@@ -1,0 +1,21 @@
+{
+  "permissions": {
+    "allow": [
+      "WebFetch(domain:wiki.archlinux.org)",
+      "WebFetch(domain:bbs.archlinux.org)",
+      "WebFetch(domain:forum.level1techs.com)",
+      "WebFetch(domain:discuss.cachyos.org)",
+      "WebSearch",
+      "Read(//proc/**)",
+      "Read(//etc/**)",
+      "Read(//boot/**)",
+      "Bash(sudo -n head -60 /boot/limine.conf)",
+      "Bash(findmnt /boot)",
+      "Bash(ls /efi)",
+      "Bash(pacman -Qi limine)",
+      "Bash(sudo ls /boot/)",
+      "Bash(sudo find /boot -maxdepth 3 -name \"limine.conf\")",
+      "Bash(sudo head -100 /boot/limine.conf)"
+    ]
+  }
+}
