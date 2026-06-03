@@ -17,18 +17,17 @@ The repo is not currently a git repository.
 The docs were written at different times and **disagree with each other**. Trust them in this order:
 
 1. **`ACTUAL-CONFIGURATION.md`** — most recent (2026-05-21), generated from a live system scan. This is the authoritative snapshot of installed packages, kernel state, NVIDIA stack, monitors, and outstanding issues.
-2. **`USABILITY.md`** — day-to-day usage reference (keybindings, workflows). Pulled from `configs/hypr/keybindings.conf`.
+2. **`shorcuts.md`** (typo intentional) — day-to-day usage reference. Combined cheatsheet + full keybinding tables + workflows + Walker/Yazi/Kitty deep-dives + troubleshooting. Pulled from `configs/hypr/keybindings.conf`. **Merged 2026-05-23** from the previous split between `shorcuts.md` (one-page cheatsheet) and `USABILITY.md` (full reference); `USABILITY.md` no longer exists.
 3. **`system-state-findings.md`** — audit comparing the planned setup against reality. Marks what's working vs. broken.
 4. **`finish-installation-commands.md`** — remediation steps for items flagged in the findings.
 5. **`cachyos-hyprland-setup.md`** — original install plan (May 2026). Now partially stale.
 6. **`spected-installation.md`** — pre-install stack rationale.
-7. **`shorcuts.md`** (typo intentional) — early shortcuts cheatsheet. **Stale** — references SDDM and exit-to-SDDM behavior that no longer apply.
 
-**When `cachyos-hyprland-setup.md` or `shorcuts.md` conflict with `ACTUAL-CONFIGURATION.md`, the latter wins.** Common stale claims in the older docs:
+**When `cachyos-hyprland-setup.md` conflicts with `ACTUAL-CONFIGURATION.md`, the latter wins.** Common stale claims in the older docs:
 
-- "SDDM is the display manager" — it's not. **plasma-login-manager** (`plasmalogin.service`) is. `/etc/sddm.conf` is a leftover stub. Any "force SDDM X11" instructions are irrelevant.
+- "SDDM is the display manager" / "plasma-login-manager is the display manager" — neither is. SDDM isn't installed; `plasmalogin.service` is installed but **disabled and inactive** since 2026-05-22 (`finish-installation-commands.md` §10 disabled it to fix the phantom-cursor handoff bug). Current boot path: `getty@tty1` autologin (`/etc/systemd/system/getty@tty1.service.d/override.conf`) → fish login shell → `~/.config/fish/conf.d/99-hyprland-autostart.fish` → `exec start-hyprland`. `/etc/sddm.conf` is a leftover stub; any "force SDDM X11" instructions are irrelevant.
 - Hyprpaper config using flat `wallpaper = ...` lines — current installed version (0.8.4) has a parser bug requiring **block syntax** (see `configs/hypr/hyprpaper.conf` and the comment in section 15 of `ACTUAL-CONFIGURATION.md`).
-- "Exit Hyprland returns to SDDM" — returns to plasma-login-manager greeter.
+- "Exit Hyprland returns to SDDM" / "returns to plasma-login-manager greeter" — no longer true. Exiting Hyprland (`Super+Shift+Q`) drops back to tty1, where `getty` immediately re-autologins and the fish snippet re-`exec start-hyprland`'s. So `Super+Shift+Q` behaves like "restart compositor". To actually log out: `Ctrl+Alt+F2` to tty2, then `loginctl terminate-user isalgado`.
 
 ## Hyprland config architecture
 
@@ -41,7 +40,7 @@ hyprland.conf  → env.conf → monitors.conf → input.conf → look.conf
 
 Plus three sibling daemons with their own configs: `hyprpaper.conf`, `hyprlock.conf`, `hypridle.conf`.
 
-When editing Hyprland behavior, find the right modular file rather than dumping everything into `hyprland.conf`. The three most-edited files are documented in section 11 of `USABILITY.md`: `keybindings.conf`, `monitors.conf`, `autostart.conf`.
+When editing Hyprland behavior, find the right modular file rather than dumping everything into `hyprland.conf`. The three most-edited files are documented in §11 of `shorcuts.md`: `keybindings.conf`, `monitors.conf`, `autostart.conf`.
 
 ## Working with config changes
 

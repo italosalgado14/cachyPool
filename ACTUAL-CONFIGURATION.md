@@ -1,6 +1,7 @@
 # Actual System Configuration
 
 **Snapshot date:** 2026-05-21
+**Last updated:** 2026-05-26 (Two fixes: (1) Elephant/Walker — `graphical-session.target` never activates under this getty+`start-hyprland` session, so `elephant.service` never auto-started and Walker hung on "Waiting for elephant"; fixed by adding `exec-once = systemctl --user start elephant.service` to autostart.conf, §10 + §15 reflect it, see `finish-installation-commands.md` §7e.ii–iii. (2) VS Code OS-keyring notification silenced via `~/.config/code-flags.conf` → `--password-store=basic`; §7 editor row + §15 reflect it, see `finish-installation-commands.md` §7f). 2026-05-23 (Walker Elephant backend installed — hub + 9 providers from AUR at `2.21.0-1`, `~/.config/systemd/user/elephant.service` user unit written + enabled; §5/§10/§12/§15 reflect new state. Earlier same-day: verified live state matches mirrored configs; phantom DP-0 EDID warning logged; display-manager row rewritten — system now boots via `getty@tty1` autologin + fish `exec start-hyprland`, plasmalogin disabled per `finish-installation-commands.md` §10)
 **Hostname:** triton500se
 **User:** isalgado
 
@@ -49,10 +50,10 @@ Total virtual desktop width: **6016 px**. No overlap, no gap.
 | Root subvolume | `subvol=/@` on `nvme0n1p2` btrfs |
 | Init | systemd |
 | Boot time | ~22s total (5s firmware / 3.5s loader / 0.9s kernel / 3s initrd / 9.5s userspace) |
-| Display manager | **plasma-login-manager** (PlasmaLogin) — NOT SDDM. Active, enabled, autologin `Session=plasma` (overridden by Hyprland selection at greeter). |
+| Display manager | **None.** `getty@tty1` drop-in autologins `isalgado` (`/etc/systemd/system/getty@tty1.service.d/override.conf`); fish login shell sources `~/.config/fish/conf.d/99-hyprland-autostart.fish`, which `exec start-hyprland` on `XDG_VTNR=1`. `plasmalogin.service` is installed but **disabled and inactive** (kept for rollback per `finish-installation-commands.md` §10). |
 | Session type | Wayland |
 | Desktop env | Hyprland (with KDE Plasma as installer-bundled fallback) |
-| Shell | `/usr/bin/zsh` (current shell; fish, bash, zsh all installed) |
+| Shell | Login shell is **`/bin/fish`** (per `/etc/passwd` for `isalgado`); fish, bash, zsh all installed. `$SHELL` may show `/usr/bin/zsh` inside non-login zsh subshells — that's inherited, not the login shell. See `finish-installation-commands.md` §10 for the fish-based Hyprland autostart path. |
 | Audio | PipeWire 1.6.5 with `pipewire-pulse` and `wireplumber`; default sink: Samson Go Mic USB |
 
 ### Kernel command line
@@ -100,7 +101,18 @@ nvidia-drm.modeset=1 nvidia_drm.fbdev=1
 | `waybar` | 0.15.0-2.1 | Status bar |
 | `mako` | 1.11.0-1.1 | Notifications |
 | `kitty` | 0.46.2-1.2 | Terminal |
-| `walker` | 2.16.2-1 | App launcher + provider hub (Elephant) |
+| `walker` | 2.16.2-1 | App launcher (runs as resident `--gapplication-service`; backed by Elephant — see below) |
+| `elephant` *(AUR)* | 2.21.0-1 | Walker backend / provider hub. Started by `~/.config/systemd/user/elephant.service` (user-managed; AUR pkg ships no unit). |
+| `elephant-desktopapplications` *(AUR)* | 2.21.0-1 | Provider — `.desktop` apps (183 indexed at last load) |
+| `elephant-calc` *(AUR)* | 2.21.0-1 | Provider — calculator (`=` prefix, uses `libqalculate`/`qalc`) |
+| `elephant-runner` *(AUR)* | 2.21.0-1 | Provider — `$PATH` runner (`>` prefix; 3361 executables indexed) |
+| `elephant-files` *(AUR)* | 2.21.0-1 | Provider — filesystem search (`/` prefix) |
+| `elephant-symbols` *(AUR)* | 2.21.0-1 | Provider — emoji/symbol picker (`.` prefix; 1948 entries) |
+| `elephant-clipboard` *(AUR)* | 2.21.0-1 | Provider — clipboard history (`:` prefix; consumes `cliphist` store) |
+| `elephant-websearch` *(AUR)* | 2.21.0-1 | Provider — web search (`@` prefix; default engine = upstream default until `~/.config/elephant/websearch.toml` is written) |
+| `elephant-providerlist` *(AUR)* | 2.21.0-1 | Provider — meta-provider listing all loaded providers (`;` prefix) |
+| `elephant-menus` *(AUR)* | 2.21.0-1 | Subsystem — custom menus via `elephant menu …`. **Note:** doesn't appear in `elephant listproviders` output by design; presence confirmed via `journalctl --user -u elephant.service \| grep 'providers loaded=menus'`. |
+| `libqalculate` | 5.10.0-1.1 | Calculator backend used by `elephant-calc` |
 | `yazi` | 26.5.6-2.1 | TUI file manager |
 | `swayosd` | 0.3.1-1.1 | Volume/brightness on-screen popups |
 | `grim` | 1.5.0-2.1 | Wayland screenshot tool |
@@ -133,7 +145,7 @@ nvidia-drm.modeset=1 nvidia_drm.fbdev=1
 
 | Package | Version | Notes |
 |---|---|---|
-| `visual-studio-code-bin` | 1.121.0-1 | Primary editor (runs on Wayland) |
+| `visual-studio-code-bin` | 1.121.0-1 | Primary editor (runs on Wayland). `~/.config/code-flags.conf` carries `--password-store=basic` to silence the "OS keyring couldn't be identified" notification (no Secret Service in this session) — see `finish-installation-commands.md` §7f. |
 | `micro` | 2.0.15-2.1 | Terminal text editor (Yazi's default for text files) |
 | `dolphin` | 26.04.1-1.1 | KDE file manager (GUI fallback) |
 | `firefox` | 150.0.3-1 | Default browser |
@@ -150,13 +162,14 @@ nvidia-drm.modeset=1 nvidia_drm.fbdev=1
 | `snapper` | 0.13.1-2.1 | btrfs snapshot manager (root config: `root`) |
 | `snap-pac` | 3.0.1-3 | Automatic snapshots on pacman transactions |
 | `btrfs-progs` | 7.0-1 | btrfs userspace tools |
-| `plymouth` | 24.004.60-14.1 | Boot splash (in mkinitcpio `HOOKS` — **TODO: remove for Thunderbolt boot fix**) |
+| `plymouth` | 24.004.60-14.1 | Boot splash. **Removed from mkinitcpio `HOOKS=` on 2026-05-22** for TB boot fix (Section 6.0). Shutdown units (`plymouth-quit`, `-quit-wait`, `-poweroff`, `-reboot`) also masked. Package retained for possible future reintroduction. |
 | `power-profiles-daemon` | 0.30-3 | Power profile switching (not TLP, not auto-cpufreq) |
 
 ## 9. Installed Packages — Counts
 
-- **Explicitly installed (user-requested):** 251
-- **Total installed (with dependencies):** 1304
+- **Explicitly installed (user-requested):** 267 (was 251 before the Walker/Elephant install on 2026-05-23)
+- **Total installed (with dependencies):** 1324 (was 1304)
+- **Foreign / AUR packages:** 11 (`pacman -Qm`) — includes `elephant` + 9 providers (all `2.21.0-1`) and `visual-studio-code-bin`
 
 Get the full explicit list with `pacman -Qe`. Get only foreign packages (AUR/manual) with `pacman -Qm`.
 
@@ -178,6 +191,7 @@ Captured via `pgrep -af`:
 | `wl-paste --type image --watch cliphist store` | autostart |
 | `nm-applet --indicator` | autostart |
 | `walker --gapplication-service` | autostart (resident service for fast launches) |
+| `elephant` | `exec-once = systemctl --user start elephant.service` (autostart.conf). The user unit at `~/.config/systemd/user/elephant.service` exists (written 2026-05-23; AUR pkg ships none) but is `WantedBy=graphical-session.target`, which **never activates** under this getty-autologin + `start-hyprland` session — so it's started explicitly from autostart.conf instead (fixed 2026-05-26; before that Walker hung on "Waiting for elephant"). Backs every Walker prefix/`-m <mode>` invocation. |
 | `polkitd` | system (PolicyKit daemon) |
 | `xdg-desktop-portal` + `xdg-desktop-portal-hyprland` | systemd user units |
 | `pipewire`, `pipewire-pulse`, `wireplumber` | systemd user units (audio) |
@@ -196,7 +210,7 @@ env.conf           ← NVIDIA + Qt + cursor env vars
 monitors.conf      ← 3-monitor layout, scale 1.25 on 2560×1600 outputs
 input.conf         ← keyboard layout, touchpad, 3-finger gesture
 look.conf          ← Catppuccin Mocha colors, dwindle, animations, blur+shadow
-keybindings.conf   ← every shortcut (see USABILITY.md)
+keybindings.conf   ← every shortcut (see shorcuts.md)
 windowrules.conf   ← floats for dialogs (pavucontrol, blueman, polkit, PiP)
 autostart.conf     ← exec-once for all daemons
 hyprpaper.conf     ← block-syntax wallpaper bindings (workaround for 0.8.4 parser bug)
@@ -211,7 +225,9 @@ hypridle.conf      ← 5m lock / 10m DPMS / 20m suspend
 ~/.config/waybar/style.css      ← bar CSS (purple workspace highlight, JetBrainsMono)
 ~/.config/kitty/kitty.conf      ← JetBrainsMono 12pt, 0.95 opacity, includes Catppuccin theme
 ~/.config/kitty/themes/Catppuccin-Mocha.conf  ← official Catppuccin theme file
-~/.config/walker/               ← EMPTY (using upstream defaults — Omarchy pattern)
+~/.config/walker/               ← EMPTY (running on Elephant defaults; pin prefixes/providers via finish-installation-commands.md §7e.iv if desired)
+~/.config/elephant/             ← EMPTY (per-provider configs optional; §7e.v swaps websearch engine to DuckDuckGo when written)
+~/.config/systemd/user/elephant.service  ← user unit written 2026-05-23 to start the Elephant hub (AUR pkg ships no unit; see §7e.ii)
 ~/.config/yazi/                 ← EMPTY (using upstream defaults — image previews via Kitty auto-detected)
 ~/.config/mako/                 ← EMPTY (using upstream defaults)
 ~/.config/fish/                 ← shell config exists (config.fish, conf.d/, functions/)
@@ -235,9 +251,10 @@ hypridle.conf      ← 5m lock / 10m DPMS / 20m suspend
 
 ## 14. Display Manager Reality Check
 
-- The plan in `cachyos-hyprland-setup.md` section 7 talks about forcing **SDDM** into X11 mode.
-- **SDDM is NOT installed/enabled.** This system uses **plasma-login-manager** (`plasmalogin.service`) instead.
-- The SDDM X11 workaround is therefore irrelevant; `/etc/sddm.conf` is a leftover stub.
+- The plan in `cachyos-hyprland-setup.md` section 7 talks about forcing **SDDM** into X11 mode. **SDDM is not installed.** `/etc/sddm.conf` is a leftover stub.
+- This system **previously** ran **plasma-login-manager** (`plasmalogin.service`). It was disabled on 2026-05-22 per `finish-installation-commands.md` §10 to eliminate the phantom-cursor handoff bug; the package is still installed for rollback but the unit is `disabled` and `inactive`.
+- **Current launch path:** `getty@tty1` drop-in (`/etc/systemd/system/getty@tty1.service.d/override.conf`) autologins `isalgado`; fish login shell runs `~/.config/fish/conf.d/99-hyprland-autostart.fish`, which `exec start-hyprland` (the package-shipped wrapper at `/usr/bin/start-hyprland`) on tty1 when no Wayland session is already attached.
+- **Why `start-hyprland` not `Hyprland`:** Hyprland ≥ 0.53 emits a startup warning when launched bare; the wrapper sets up the systemd user session, D-Bus activation, and XDG session vars before exec'ing the compositor. Launching the compositor directly leaves `XDG_SESSION_TYPE=tty`, no `XDG_CURRENT_DESKTOP`, and breaks portals / polkit prompts / screen sharing for some apps. Fixed 2026-05-23.
 
 ---
 
@@ -256,12 +273,17 @@ These are tracked in `system-state-findings.md` and `finish-installation-command
 | qt6ct env var | ✅ Package installed, env var valid |
 | Kitty Catppuccin theme | ✅ Applied |
 | Yazi config | ✅ Working on defaults (no custom config needed; image previews via Kitty auto-detected) |
-| Walker config | ✅ Working on defaults (Omarchy pattern); `Super+Ctrl+E` symbols, `Super+Ctrl+V` clipboard |
+| Walker config | ✅ Elephant-backed (2026-05-23) — hub + 9 providers (apps, calc, runner, files, symbols, clipboard, websearch, providerlist, menus) from AUR; user unit at `~/.config/systemd/user/elephant.service`. Verified: `walker -m clipboard` and `walker -m symbols` open working UIs. `~/.config/walker/config.toml` and `~/.config/elephant/*.toml` not yet written — running on Elephant defaults (websearch prefix is `@`; `shorcuts.md` §1.2 and §4 reflect this). §7e.iv–v in `finish-installation-commands.md` pins these if desired. **Startup fix 2026-05-26:** the unit was `enabled` but `WantedBy=graphical-session.target`, which never activates under this getty+`start-hyprland` session, so elephant never started and Walker hung on "Waiting for elephant". Now started explicitly via `exec-once = systemctl --user start elephant.service` in autostart.conf (see §7e.ii–iii). |
+| VS Code OS-keyring notification | ✅ Resolved — `~/.config/code-flags.conf` sets `--password-store=basic` so VS Code skips the missing Secret Service backend (no keyring daemon in this Hyprland session). Trade-off: secrets stored in an obfuscated local file, not keyring-encrypted. Details + revert path: `finish-installation-commands.md` §7f. |
 | HiDPI scaling | ✅ Scale 1.25 on eDP-1 and DP-2; positions recalculated |
 | LTS kernel cmdline | ⚠ Still missing `nvidia-drm.modeset=1` on `linux-cachyos-lts` entry |
-| Thunderbolt boot hang | ⚠ NOT FIXED — Plymouth still in `HOOKS=`; cmdline still has `quiet splash`; no `pcie_aspm=off` or `thunderbolt.host_reset=0` (planned for next day) |
-| Leftover Windows/Ubuntu partitions | ⚠ `nvme1n1p3` (NTFS 559 GiB) + `nvme1n1p4` (ext4 393 GiB) still present, unmounted, reclaim candidates |
-| SDDM X11 workaround | N/A — plasma-login-manager is in use instead |
+| Thunderbolt boot hang | ✅ Resolved 2026-05-22 — `thunderbolt.host_reset=0` on `linux-cachyos` cmdline, `plymouth` removed from `HOOKS=`, `quiet splash` dropped. TB4 dock now boots cleanly. Details: `finish-installation-commands.md` §6.0. ⚠ LTS entry still missing the same param. |
+| Thunderbolt shutdown hang | ✅ Resolved 2026-05-22 — `nvidia-{suspend,resume,hibernate}` enabled; `NVreg_PreserveVideoMemoryAllocations=1` + `/var/tmp` spill via `/etc/modprobe.d/nvidia-power-management.conf`; Plymouth shutdown units masked; `DefaultTimeoutStopSec=15s` (diagnostic). Details: `finish-installation-commands.md` §6.0. |
+| NVIDIA black-screen on resume from suspend | 🔧 Fix applied 2026-05-26 — resume from **deep (S3)** suspend crashed the NVIDIA open module (595.71.05). On the 2026-05-26 21:38 resume: `nvidia-drm: Failed to detect display state` + **333 `NVRM:` MMU-walk assertion failures** (`mmuWalkUnmap`/`mmuWalkSparsify` → `NV_ERR_INVALID_STATE`) wedged the display engine → screen stayed black while the system kept running headless → forced power-off at 21:44 (journal ends mid-line on a WiFi rekey, no shutdown sequence). Same `Failed to detect display state` seen milder (2 errors, recovered) on the 2026-05-25 19:15 resume, so it's recurring. `NVreg_PreserveVideoMemoryAllocations=1`, `/var/tmp` spill, and `nvidia-{suspend,resume,hibernate}` were **all already correctly set** — this is a driver-level S3-resume bug, not a misconfig. **Fix:** force `s2idle` instead of S3 via `mem_sleep_default=s2idle` appended to the `linux-cachyos` cmdline in `/etc/default/limine`, then `sudo limine-mkinitcpio`. Live-applied 2026-05-26 (`/sys/power/mem_sleep` now `[s2idle] deep`); persist + verify steps in `finish-installation-commands.md` §11. ⚠ LTS entry not updated. Re-evaluate if a newer NVIDIA driver fixes S3 resume. |
+| Leftover Windows/Ubuntu partitions | ℹ️ Intentionally retained — `nvme1n1p3` (NTFS 559 GiB) + `nvme1n1p4` (ext4 393 GiB) keep other OS docks/data. Cleanup section removed from `finish-installation-commands.md` on 2026-05-22. |
+| SDDM X11 workaround | N/A — no display manager (boot via `getty@tty1` autologin + fish `exec start-hyprland`); `plasmalogin` disabled 2026-05-22 per `finish-installation-commands.md` §10 |
+| Phantom `DP-0` EDID warning at boot | ℹ️ Benign — NVIDIA logs `nvidia-modeset: WARNING: GPU:0: Unable to read EDID for display device DP-0` because nothing is plugged into that connector. The three real outputs (`eDP-1`, `DP-1`, `DP-2`) come up cleanly. No action needed. |
+| `DP-2` (RTK HDMI adapter) reports garbage EDID | ℹ️ Cosmetic — Hyprland shows `Invalid Vendor Codename - RTK HDMI 0x01010101`. Modes are still detected correctly; runs at 2560×1600@120 as expected. |
 
 ---
 
@@ -273,7 +295,7 @@ cachyPool/
 ├── spected-installation.md            ← expected/recommended stack
 ├── system-state-findings.md           ← scan report after install
 ├── finish-installation-commands.md    ← step-by-step remediation
-├── USABILITY.md                       ← daily shortcuts + workflows
+├── shorcuts.md                        ← daily shortcuts + workflows + Walker/Yazi/Kitty + troubleshooting (merged 2026-05-23, replaces the old USABILITY.md)
 ├── ACTUAL-CONFIGURATION.md            ← this file
 └── configs/                           ← live copies of all dotfiles
     ├── hypr/
@@ -309,10 +331,10 @@ If you ever rebuild this machine (or set up a second one), the minimal sequence:
 4. Install the full Hyprland stack (see section 4–8 above, or `cachyos-hyprland-setup.md` section 4).
 5. Restore dotfiles: `cp -r configs/hypr ~/.config/`, same for `waybar/` and `kitty/`.
 6. Wallpaper: `mkdir -p ~/Pictures/Wallpapers && cp wall.jpg ~/Pictures/Wallpapers/` (or download from a Catppuccin wallpaper repo).
-7. Log out → at the PlasmaLogin greeter, pick Hyprland session → log in.
+7. Apply `finish-installation-commands.md` §10 to disable `plasmalogin.service` and switch to `getty@tty1` autologin + fish `exec start-hyprland`. (Or skip §10 to keep the PlasmaLogin greeter — pick Hyprland session at the greeter and log in.)
 8. Verify: `hyprctl version`, `hyprctl monitors`, `nvidia-smi`.
 9. The autostart entries in `~/.config/hypr/autostart.conf` bring up bar, wallpaper, notifications, polkit, clipboard, network/BT tray, and the walker resident service automatically.
 
 ---
 
-*Generated 2026-05-21 from live system scan. Update this file whenever a major change lands (kernel upgrade, new daemon, new monitor, etc.) by re-running the verification block in section 10 of `finish-installation-commands.md`.*
+*Generated 2026-05-21 from live system scan; refreshed 2026-05-22 after Section 6 TB fix landed. Update this file whenever a major change lands (kernel upgrade, new daemon, new monitor, etc.) by re-running the verification block in section 9 of `finish-installation-commands.md`.*
