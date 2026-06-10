@@ -19,6 +19,7 @@ This is the day-to-day reference: the "memorize these first" cheatsheet up top, 
 | `Super` + `E` | File manager (Yazi in Kitty) |
 | `Super` + `Q` | Close active window |
 | `Super` + `L` | Lock screen (Hyprlock) |
+| `Super` + `M` | Toggle monitor layout: `desktop` ↔ `read` (manual override of the auto-switcher; see §3) |
 | `Super` + `Shift` + `Q` | Exit Hyprland (drops to tty1 → autologin re-`exec`s Hyprland; behaves like "restart compositor". To actually log out: `Ctrl+Alt+F2` → `loginctl terminate-user isalgado`) |
 
 > The full keybinding tables follow in §1. Workflows in §2. Walker / Yazi / Kitty deep-dives in §4–§6.
@@ -36,6 +37,7 @@ This is the day-to-day reference: the "memorize these first" cheatsheet up top, 
 | `Super` + `Shift` + `Enter` | Open Firefox |
 | `Super` + `E` | Open file manager (Yazi in Kitty) |
 | `Super` + `L` | Lock screen (Hyprlock) |
+| `Super` + `M` | Toggle monitor layout `desktop` ↔ `read` (manual override of the auto-switcher; see §3) |
 | `Super` + `Shift` + `Q` | Exit Hyprland (see Quick-reference footnote above) |
 
 ### 1.2 Walker modes (also reachable by typing a prefix character into Walker)
@@ -187,6 +189,23 @@ Effective horizontal layout, left to right:
 - Workspaces 4 / 5 live on the laptop.
 - Workspaces 6–9 live on the HDMI right monitor.
 - Move the cursor straight across the seam to traverse monitors.
+
+The layout above is the static `desktop` profile. As of 2026-06-10 a hotplug daemon
+(`~/.config/hypr/scripts/monitor-autoswitch.sh`, started from `autostart.conf`) picks
+the layout automatically from what's plugged in:
+
+| Connected | Auto profile | Arrangement (left → right) |
+|---|---|---|
+| Both externals (DP-1 + DP-2) | `read` | Samsung · portable **rotated portrait** · laptop |
+| One external (DP-1 *or* DP-2) | `onescreen` | external · laptop |
+| Integrated screen only | `laptop` | laptop alone |
+| — | `desktop` | never auto — `Super` + `M` only |
+
+- `Super` + `M` toggles **desktop ↔ read** by hand; the choice holds until the next
+  plug/unplug, when the daemon re-asserts the automatic profile.
+- Apply any profile directly: `~/.config/hypr/scripts/monitor-mode.sh {desktop|read|laptop|onescreen}`.
+- Geometry for all profiles lives in `monitor-mode.sh`; full details in
+  `ACTUAL-CONFIGURATION.md` §11 "Monitor profiles & auto-switching".
 
 > If you want bigger UI on the laptop later: bump `eDP-1` scale to `1.333333` and shift positions to `DP-1 @ 1920x0`, `DP-2 @ 3840x0`. See `system-state-findings.md` and `finish-installation-commands.md` for the math.
 

@@ -35,6 +35,10 @@ This is an honest dump of the current state of the machine: hardware, OS, kernel
 
 Total virtual desktop width: **6016 px**. No overlap, no gap.
 
+The table above is the static `desktop` layout. As of 2026-06-10 the live arrangement
+is chosen automatically by a hotplug daemon (`read` / `onescreen` / `laptop`) — see
+§11 "Monitor profiles & auto-switching".
+
 ---
 
 ## 2. Operating System
@@ -190,6 +194,7 @@ Captured via `pgrep -af`:
 | `wl-paste --type text --watch cliphist store` | autostart |
 | `wl-paste --type image --watch cliphist store` | autostart |
 | `nm-applet --indicator` | autostart |
+| `monitor-autoswitch.sh` (+ child `socat` on `.socket2`) | `exec-once = ~/.config/hypr/scripts/monitor-autoswitch.sh` (autostart.conf). Long-lived; auto-selects the monitor profile (`read` / `onescreen` / `laptop`) on each hotplug event. See §11 "Monitor profiles & auto-switching". Added 2026-06-10. |
 | `walker --gapplication-service` | autostart (resident service for fast launches) |
 | `elephant` | `exec-once = systemctl --user start elephant.service` (autostart.conf). The user unit at `~/.config/systemd/user/elephant.service` exists (written 2026-05-23; AUR pkg ships none) but is `WantedBy=graphical-session.target`, which **never activates** under this getty-autologin + `start-hyprland` session — so it's started explicitly from autostart.conf instead (fixed 2026-05-26; before that Walker hung on "Waiting for elephant"). Backs every Walker prefix/`-m <mode>` invocation. |
 | `polkitd` | system (PolicyKit daemon) |
@@ -216,7 +221,35 @@ autostart.conf     ← exec-once for all daemons
 hyprpaper.conf     ← block-syntax wallpaper bindings (workaround for 0.8.4 parser bug)
 hyprlock.conf      ← Catppuccin password input + big clock + blurred wallpaper
 hypridle.conf      ← 5m lock / 10m DPMS / 20m suspend
+monitors-read.conf ← alternate "read" profile (portable rotated portrait); NOT sourced, applied live
+scripts/monitor-mode.sh        ← apply a named layout: desktop|read|laptop|onescreen|toggle
+scripts/monitor-autoswitch.sh  ← daemon: auto-picks layout from connected displays (autostart.conf)
 ```
+
+### Monitor profiles & auto-switching (added 2026-06-10)
+
+`monitors.conf` still defines the static 3-across "desktop" layout, but the live layout
+is now driven by **`scripts/monitor-autoswitch.sh`**, a daemon launched from
+`autostart.conf` (`exec-once`). It listens to Hyprland's `.socket2` for monitor
+hotplug events and applies a profile based on what is connected:
+
+| Connected displays | Auto-applied profile | Arrangement (left → right) |
+|---|---|---|
+| DP-1 + DP-2 (both externals) | **`read`** | Samsung FHD · portable QHD **rotated 270° (portrait)** · laptop |
+| Exactly one external (DP-1 **or** DP-2) | **`onescreen`** | that external (landscape) · laptop |
+| No externals (integrated only) | **`laptop`** | `eDP-1` alone at `0×0` |
+| — | **`desktop`** | **never auto** — manual only, via `Super+M` |
+
+- Geometry for every profile lives in **`scripts/monitor-mode.sh`** (single source of
+  truth; the daemon only decides *which* profile to call). It can also be run by hand:
+  `~/.config/hypr/scripts/monitor-mode.sh {desktop|read|laptop|onescreen}`.
+- **`Super+M`** (in `keybindings.conf`) toggles **desktop ↔ read** manually. A manual
+  choice holds until the next hotplug event, when the daemon re-asserts the automatic
+  profile for the current display set.
+- `read` rotates the portable (DP-2) with `transform, 3` → 1280×2048 logical column for
+  reading pages. `onescreen` keeps whichever single external in landscape.
+- State is tracked in `$XDG_RUNTIME_DIR/hypr-monitor-mode`; the daemon re-applies only
+  when the desired profile differs from the current one (no notification spam).
 
 ## 12. Other Configs
 
@@ -309,7 +342,11 @@ cachyPool/
     │   ├── keybindings.conf
     │   ├── look.conf
     │   ├── monitors.conf
-    │   └── windowrules.conf
+    │   ├── monitors-read.conf         ← alternate "read" profile (not sourced)
+    │   ├── windowrules.conf
+    │   └── scripts/
+    │       ├── monitor-mode.sh        ← apply a named layout
+    │       └── monitor-autoswitch.sh  ← hotplug auto-switch daemon
     ├── waybar/
     │   ├── config.jsonc
     │   └── style.css
