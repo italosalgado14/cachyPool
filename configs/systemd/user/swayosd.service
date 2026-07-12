@@ -1,0 +1,19 @@
+[Unit]
+Description=SwayOSD volume/brightness on-screen display server
+PartOf=graphical-session.target
+After=graphical-session.target
+# swayosd 0.3.1 (gtk4-layer-shell) aborts every time the monitor set changes
+# (e.g. the 'read' profile disabling eDP-1, or any hotplug). With Restart=always
+# that can mean several crashes in a short window during a switch; disable the
+# start rate-limit so systemd never gives up and leaves the server dead.
+StartLimitIntervalSec=0
+
+[Service]
+ExecStart=/usr/bin/swayosd-server
+# Auto-restart so the volume/brightness OSD and the media keys (swayosd-client
+# talks to this server) survive monitor switches instead of dying with it.
+Restart=always
+RestartSec=1
+
+[Install]
+WantedBy=graphical-session.target

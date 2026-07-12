@@ -40,7 +40,11 @@
     "format": "{icon} {volume}%",
     "format-muted": "  muted",
     "format-icons": { "default": ["", "", ""] },
-    "on-click": "pavucontrol"
+    "on-click": "pavucontrol",
+    "on-click-middle": "swayosd-client --output-volume mute-toggle",
+    "on-scroll-up": "swayosd-client --output-volume raise",
+    "on-scroll-down": "swayosd-client --output-volume lower",
+    "scroll-step": 5
   },
   "tray": { "spacing": 8 }
 }

@@ -19,7 +19,7 @@ This is the day-to-day reference: the "memorize these first" cheatsheet up top, 
 | `Super` + `E` | File manager (Yazi in Kitty) |
 | `Super` + `Q` | Close active window |
 | `Super` + `L` | Lock screen (Hyprlock) |
-| `Super` + `M` | Toggle monitor layout: `desktop` ↔ `read` (manual override of the auto-switcher; see §3) |
+| `Super` + `M` | Toggle monitor layout — `read`↔`desktop` (desk) / `read`↔`trio` (road); manual override of the auto-switcher, see §3 |
 | `Super` + `Shift` + `Q` | Exit Hyprland (drops to tty1 → autologin re-`exec`s Hyprland; behaves like "restart compositor". To actually log out: `Ctrl+Alt+F2` → `loginctl terminate-user isalgado`) |
 
 > The full keybinding tables follow in §1. Workflows in §2. Walker / Yazi / Kitty deep-dives in §4–§6.
@@ -36,8 +36,9 @@ This is the day-to-day reference: the "memorize these first" cheatsheet up top, 
 | `Super` + `Space` | Walker app launcher |
 | `Super` + `Shift` + `Enter` | Open Firefox |
 | `Super` + `E` | Open file manager (Yazi in Kitty) |
+| `Super` + `/` | Show the shortcuts cheatsheet (curated subset of this file; also a **Shortcuts** entry in Walker) |
 | `Super` + `L` | Lock screen (Hyprlock) |
-| `Super` + `M` | Toggle monitor layout `desktop` ↔ `read` (manual override of the auto-switcher; see §3) |
+| `Super` + `M` | Toggle monitor layout — `read`↔`desktop` (desk) / `read`↔`trio` (road); manual override of the auto-switcher, see §3 |
 | `Super` + `Shift` + `Q` | Exit Hyprland (see Quick-reference footnote above) |
 
 ### 1.2 Walker modes (also reachable by typing a prefix character into Walker)
@@ -87,8 +88,8 @@ This is the day-to-day reference: the "memorize these first" cheatsheet up top, 
 | `Super` + `1`…`9` | Switch to workspace N |
 | `Super` + `Shift` + `1`…`9` | Send active window to workspace N |
 
-> Workspaces 1–3 live on **DP-1 (Samsung)** · 4–5 on **eDP-1 (laptop)** · 6–9 on **DP-2 (HDMI right)**.
-> Workspace `1` (Samsung) is the default for new windows.
+> Workspaces 1–3 live on the **desk primary (Xiaomi 27" 4K)** · 4–5 on **eDP-1 (laptop)** · 6–9 on the **portable QHD (right)**.
+> Workspace `1` (Xiaomi) is the default for new windows.
 
 ### 1.7 Screenshots
 
@@ -120,10 +121,10 @@ This is the day-to-day reference: the "memorize these first" cheatsheet up top, 
 
 1. `Super` + `Enter` → open Kitty
 2. `cd ~/code/<project>` then `code .` (VS Code) — VS Code is installed (`visual-studio-code-bin`) and runs on Wayland via the `ELECTRON_OZONE_PLATFORM_HINT=auto` env in `env.conf`.
-3. `Super` + `2` to keep VS Code on a clean workspace (Samsung primary)
+3. `Super` + `2` to keep VS Code on a clean workspace (Xiaomi, desk primary)
 4. Another Kitty on `Super` + `3` for `git`/build commands.
 5. If you need a side-by-side editor + browser:
-   - VS Code on workspace `2` (Samsung)
+   - VS Code on workspace `2` (Xiaomi)
    - Firefox (`Super` + `Shift` + `Enter`) → workspace `6` (HDMI right) for docs/MDN/preview
    - Workspace `4`/`5` on the laptop for logs / terminal output
 
@@ -146,7 +147,7 @@ The compositor is **dwindle**: every new window splits the focused space in half
 2. **`Super` + `Shift` + arrow** — slot it into a neighbor position.
 3. To change *how* the split happened (vertical ↔ horizontal): focus the window, `Super` + `J`.
 4. To break out of tiling for a single window: `Super` + `V` (toggle floating). Then drag with `Super` + left-mouse to move it freely, `Super` + right-mouse to resize.
-5. To send a window to another monitor's workspace: `Super` + `Shift` + (`1`/`2`/`3` for Samsung, `4`/`5` for laptop, `6`–`9` for HDMI). Then follow with `Super` + N to jump to that workspace.
+5. To send a window to another monitor's workspace: `Super` + `Shift` + (`1`/`2`/`3` for the Xiaomi desk primary, `4`/`5` for laptop, `6`–`9` for the portable QHD). Then follow with `Super` + N to jump to that workspace.
 
 ### E. "Quick screenshot for a bug report / Slack"
 
@@ -159,7 +160,7 @@ The compositor is **dwindle**: every new window splits the focused space in half
 - Or just walk away — Hypridle handles it:
   - 5 min idle → lock screen
   - 10 min idle → monitors sleep (DPMS off)
-  - 20 min idle → system suspend
+  - 20 min idle → system suspend — **only on battery** (since 2026-07-12; on AC/USB-C power the machine stays awake because resume from long s2idle can crash the NVIDIA driver)
 
 ### G. "Bluetooth headphones / mouse"
 
@@ -175,19 +176,23 @@ The compositor is **dwindle**: every new window splits the focused space in half
 
 ## 3. Multi-monitor layout (current)
 
-Effective horizontal layout, left to right:
+**Live right now** is the `read` profile (the desk auto-picks it): the **Xiaomi 27" 4K**
+landscape-left @ 3072×1728 (scale 1.25) · portable QHD rotated **portrait**-right · laptop off.
+
+The static `desktop` 3-across profile below is the reference layout, but it **still holds the
+old Samsung geometry** and hasn't been re-fitted for the Xiaomi (see ⚠ after the table):
 
 ```
-[ eDP-1 laptop ]  [ DP-1 Samsung ]  [ DP-2 HDMI right ]
-  2048 × 1280        1920 × 1080       2048 × 1280
-   scale 1.25         scale 1.00        scale 1.25
-   0px – 2048px       2048 – 3968px     3968 – 6016px
-   240 Hz             120 Hz            120 Hz
+[ eDP-1 laptop ]  [ centre: was Samsung ]  [ portable QHD right ]
+  2048 × 1280        1920 × 1080  ⚠           2048 × 1280
+   scale 1.25         scale 1.00  ⚠            scale 1.25
+   0 – 2048px         2048 – 3968px ⚠         3968 – 6016px
+   240 Hz             120 Hz                  120 Hz
 ```
 
-- **Samsung is primary** — workspace 1 lives there and new windows default to it.
-- Workspaces 4 / 5 live on the laptop.
-- Workspaces 6–9 live on the HDMI right monitor.
+- **Desk primary is now the Xiaomi 27" 4K** (replaced the Samsung FHD 24", 2026-07-11) — workspace 1 lives there, new windows default to it.
+- Workspaces 4 / 5 live on the laptop · 6–9 on the portable QHD (right).
+- ⚠ The centre slot's `1920×1080@120` is the old Samsung's; the Xiaomi is `3840×2160@60` and can't do the `2560×1600` DP-2 slot either — re-fit the `desktop` profile before using `Super+M → desktop`.
 - Move the cursor straight across the seam to traverse monitors.
 
 The layout above is the static `desktop` profile. As of 2026-06-10 a hotplug daemon
@@ -196,14 +201,18 @@ the layout automatically from what's plugged in:
 
 | Connected | Auto profile | Arrangement (left → right) |
 |---|---|---|
-| Both externals (DP-1 + DP-2) | `read` | Samsung · portable **rotated portrait** · laptop |
-| One external (DP-1 *or* DP-2) | `onescreen` | external · laptop |
+| Two externals incl. the **demoset** FHD portable | `trio` | FHD · **laptop (center)** · QHD — all landscape |
+| Two externals (e.g. Xiaomi 4K + portable QHD) | `read` | desk external landscape (Xiaomi @ 3072×1728) · portable QHD **rotated portrait** · **laptop off** |
+| One external | `onescreen` | external · laptop |
 | Integrated screen only | `laptop` | laptop alone |
 | — | `desktop` | never auto — `Super` + `M` only |
 
-- `Super` + `M` toggles **desktop ↔ read** by hand; the choice holds until the next
-  plug/unplug, when the daemon re-asserts the automatic profile.
-- Apply any profile directly: `~/.config/hypr/scripts/monitor-mode.sh {desktop|read|laptop|onescreen}`.
+- `Super` + `M` toggles by hand: **read ↔ desktop** at the desk, **read ↔ trio** on the
+  road (it prefers `trio` when the demoset FHD portable is connected). The choice holds
+  until the next **external** plug/unplug, when the daemon re-asserts the automatic profile.
+- Apply any profile directly: `~/.config/hypr/scripts/monitor-mode.sh {desktop|read|laptop|onescreen|trio}`.
+- The `read`/`trio` profiles pick panels by capability (QHD = whichever external does
+  `2560×1600`), so they also work on the road where DP-1/DP-2 swap with plug order.
 - Geometry for all profiles lives in `monitor-mode.sh`; full details in
   `ACTUAL-CONFIGURATION.md` §11 "Monitor profiles & auto-switching".
 
@@ -229,6 +238,7 @@ Walker (`Super` + `Space`) replaces rofi/wofi/krunner. Behaviors that are easy t
 - **Shift + Enter** activates AND keeps Walker open (launch multiple apps in a row)
 - **Escape** cancels
 - **Up / Down** or **Ctrl-K / Ctrl-J** navigate the list
+- **Type `Shortcuts`** (or `cheatsheet` / `hotkeys` / `keys`) → a **Shortcuts** app entry that opens this cheatsheet in a floating Kitty window. It's a normal `.desktop` app (`~/.local/share/applications/shortcuts.desktop`, mirrored in `configs/applications/`) backed by `~/.config/hypr/scripts/show-shortcuts.sh`; the same script is bound to `Super` + `/`. Keep the curated subset in that script in sync with §1 when bindings change.
 
 ### 4.1 Architecture (matters when things break)
 
@@ -286,10 +296,10 @@ The terminal uses JetBrains Mono Nerd Font 12pt + Catppuccin Mocha theme + 95% b
 - **Manual lock:** `Super` + `L`
 - **Auto-lock:** 5 minutes of input idle
 - **Screen off:** 10 minutes
-- **Suspend:** 20 minutes (will require password to resume)
-- **Lid close:** triggers `loginctl lock-session` then suspend (handled by logind defaults, not hypridle)
+- **Suspend:** 20 minutes, **battery only** (will require password to resume). On AC/USB-C power the machine stays awake — changed 2026-07-12 after a resume-from-suspend NVIDIA crash (see `ACTUAL-CONFIGURATION.md` §15, GSP row).
+- **Lid close:** locks, then suspends **only on battery** (logind: `HandleLidSwitchExternalPower=ignore` since 2026-07-12); docked with external monitors it never suspends.
 
-To customize timeouts: edit `~/.config/hypr/hypridle.conf` and `hyprctl reload`.
+To customize timeouts: edit `~/.config/hypr/hypridle.conf`, then restart the daemon: `pkill hypridle; hyprctl dispatch exec hypridle` (`hyprctl reload` does **not** re-read hypridle.conf).
 
 ---
 
@@ -344,4 +354,4 @@ After any change: `hyprctl reload` (no logout needed). Tracked copies live in `c
 
 ---
 
-*Merged 2026-05-23: this file replaces the previous split between `shorcuts.md` (one-page cheatsheet) and `USABILITY.md` (daily reference). Verified live `~/.config/hypr/*` matches the mirrored `configs/hypr/*` in this repo, and live `hyprctl monitors` matches the layout in §3.*
+*Merged 2026-05-23: this file replaces the previous split between `shortcuts.md` (one-page cheatsheet) and `USABILITY.md` (daily reference). Verified live `~/.config/hypr/*` matches the mirrored `configs/hypr/*` in this repo, and live `hyprctl monitors` matches the layout in §3.*

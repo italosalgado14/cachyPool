@@ -902,7 +902,7 @@ provider = "providerlist"
 EOF
 ```
 
-> **Default web-search prefix is `@`, not `?`.** Walker 2.x's default prefix changed from the older `?`. If you specifically want `?` back, replace the `websearch` prefix block above with `prefix = "?"` *and* update `shorcuts.md` §1.2 / §4 to match (currently those reflect the `@` default).
+> **Default web-search prefix is `@`, not `?`.** Walker 2.x's default prefix changed from the older `?`. If you specifically want `?` back, replace the `websearch` prefix block above with `prefix = "?"` *and* update `shortcuts.md` §1.2 / §4 to match (currently those reflect the `@` default).
 
 #### 7e.v Provider-specific configs under `~/.config/elephant/`
 
@@ -1380,6 +1380,85 @@ If a future NVIDIA driver fixes S3 resume, this whole section can be dropped —
 
 ---
 
+## 12. Firefox freeze 2026-07-02 — VA-API off the NVIDIA shim, hardware decode paused (CONFIRMED ISSUE)
+
+**Symptom (2026-07-02 21:10):** Firefox froze solid mid-video; the whole session was on borrowed time until reboot.
+
+### 12a. What actually happened (journal, boot `8790fdd2809a4b8991c4b0d1f17b1a94`)
+
+1. **20:48:45 — resume from suspend; the dGPU never came back.** GSP firmware re-init failed: `NVRM: … Reset required [NV_ERR_RESET_REQUIRED] … kgspWaitForRmInitDone`. The dGPU is dead until reboot, and everything that touches it afterwards logs NVRM errors — **384 this boot** (344 / 359 on the two prior boots; a boot without a suspend cycle logged 0).
+2. **20:57:39** — `NVRM: GPU0 vaspaceapiConstruct_IMPL: Could not construct VA space. Status 1a`: a client tried to create a GPU **virtual address space** on the dead dGPU. Despite the name, this is *not* the VA-API video shim — it's generic GPU memory management failing.
+3. **21:10:42–54 — the freeze.** Firefox's decoder thread hung the **Intel iGPU's** video engine three times (`i915 … GPU HANG: ecode 12:4:0ccbc9c7, in MediaPD~der`), and i915's hang-recovery then crashed the kernel: `BUG: kernel NULL pointer dereference … RIP: __gen8_ppgtt_clear+0x1da/0x2c0 [i915]`. That wedges i915's GPU memory management — and i915 drives all three monitors.
+
+### 12b. Findings that corrected the working theory
+
+- **Firefox never used the NVIDIA VA-API path.** Walker → Elephant launches apps from the systemd `--user` manager, so `env.conf` vars (including `LIBVA_DRIVER_NAME=nvidia`) never reach them — verified in the running Firefox's `/proc/<pid>/environ`. Firefox auto-picked the compositor's device and was **already** hardware-decoding on the iGPU.
+- **The compositor renders on the iGPU.** aquamarine: `card2` (i915) is primary DRM, renderer on `renderD129`; all three monitors are iGPU connectors. `card1` (NVIDIA) is a secondary backend with unused connectors (`eDP-2`, `HDMI-A-1`).
+- **Firefox's profile is XDG-based:** `~/.config/mozilla/firefox/31yk9hxe.default-release` (there is no `~/.mozilla`). The pacman `firefox 151.0.4` is the one in use; the `org.mozilla.firefox` flatpak has no profile.
+- Net: **two independent bugs** (NVIDIA GSP resume death on `610.43.02`; i915 hang-recovery NULL deref in `7.0.12-1-cachyos`) **plus one useless config** (VA-API forced at a dGPU that should never decode video).
+
+### 12c. Applied 2026-07-02 (repo + live, no sudo needed)
+
+1. `configs/hypr/env.conf` → `~/.config/hypr/env.conf`: `LIBVA_DRIVER_NAME` `nvidia` → `iHD` (`intel-media-driver 26.1.5` was already installed); `NVD_BACKEND=direct` removed (shim-only knob). Takes effect on the next Hyprland start — the reboot below covers it.
+2. Firefox hardware video decode **paused** via `~/.config/mozilla/firefox/31yk9hxe.default-release/user.js`:
+
+   ```js
+   user_pref("media.ffmpeg.vaapi.enabled", false);
+   user_pref("media.hardware-video-decoding.force-enabled", false);
+   ```
+
+   Software decode is the deliberate stable state: on this kernel any future video-engine hang can NULL-deref again, and env vars can't protect Walker-launched Firefox — profile prefs can. The i9-12900H handles software decode fine; the cost is CPU/battery, not stability.
+
+### 12d. Run with sudo (pending)
+
+```bash
+# Remove the NVIDIA VA-API shim — leaf package, nothing depends on it
+# (revert = sudo pacman -S libva-nvidia-driver):
+sudo pacman -Rns libva-nvidia-driver
+
+# While you have sudo, inspect the LTS boot entry (escape hatch for the i915 bug):
+sudo grep -i -B2 -A8 lts /boot/limine.conf
+# → its cmdline should match the main entry (root=…, nowatchdog,
+#   thunderbolt.host_reset=0, mem_sleep_default=s2idle).
+# modeset params are NOT needed on any cmdline anymore: nvidia-drm.modeset is the
+# 610-series driver default and the modules early-load via
+# /etc/mkinitcpio.conf.d/10-chwd.conf (kernel-agnostic).
+```
+
+Then **reboot** — mandatory regardless: this boot's i915 is wedged (the NULL deref already fired at 21:10).
+
+### 12e. Verify after reboot
+
+```bash
+env | grep LIBVA                    # in a keybind-launched kitty → LIBVA_DRIVER_NAME=iHD
+journalctl -k -b 0 | grep -c NVRM   # ~0 before the first suspend
+```
+
+- Firefox `about:support` → the media section should report hardware video decoding **disabled** (by pref).
+- Play ~10 min of video; `journalctl -kf` must stay free of `GPU HANG`.
+- After the first suspend/resume: if the GSP `Reset required` burst returns, that's the separate open dGPU bug (§15 row) — the session should survive it since nothing critical runs on the dGPU.
+
+### 12f. Re-enable hardware decode later (the real fix arrives with a kernel)
+
+When a kernel newer than `7.0.12-1-cachyos` lands (or when testing on `linux-cachyos-lts`):
+
+1. Delete the two `user_pref` lines (or the whole `user.js` if nothing else was added to it) and restart Firefox — it will hardware-decode on the iGPU via iHD, which is the desired end state.
+2. Play video and watch `journalctl -kf` for `GPU HANG`. Clean for a few sessions → keep it. A hang again → restore the prefs and stay on software decode.
+
+Optional sanity check of the iHD stack: `sudo pacman -S libva-utils`, then `vainfo --display drm --device /dev/dri/by-path/pci-0000:00:02.0-render`.
+
+### 12g. Escape hatch if freezes continue even with hardware decode off
+
+Boot `linux-cachyos-lts 6.18.35` from the Limine menu (verify the entry per §12d first). Its i915 predates the bleeding-edge branch — that's the point — but re-test suspend/resume behavior there before adopting it.
+
+### 12h. References
+
+- Journal evidence: `journalctl -k -b 8790fdd2809a4b8991c4b0d1f17b1a94`.
+- [Arch Wiki — Hardware video acceleration](https://wiki.archlinux.org/title/Hardware_video_acceleration) — VA-API driver selection (`LIBVA_DRIVER_NAME`, iHD vs the NVIDIA shim).
+- [Arch Wiki — Firefox § Hardware video acceleration](https://wiki.archlinux.org/title/Firefox#Hardware_video_acceleration) — `media.ffmpeg.vaapi.enabled`.
+
+---
+
 ## Order of operations summary
 
 | Priority | Section | Reboot needed? |
@@ -1395,6 +1474,7 @@ If a future NVIDIA driver fixes S3 resume, this whole section can be dropped —
 | Invasive | 6. Thunderbolt boot fix | YES — and with dock |
 | Invasive | 10. Switch DM → getty autologin (fixes phantom cursor at root) | YES |
 | ⚠ Recommended | 11. Force `s2idle` (NVIDIA resume black-screen) | Live: No · Persist: YES |
+| 🔥 Do first | 12. Firefox-freeze fix: VA-API → iGPU, hardware decode paused | YES — reboot also clears the wedged i915 |
 
 ---
 

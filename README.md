@@ -9,7 +9,7 @@ This is **not a software project** — there is no build, test, or lint pipeline
 ```
 cachyPool/
 ├── ACTUAL-CONFIGURATION.md        ← authoritative live-system snapshot (start here)
-├── shorcuts.md                    ← daily keybindings, workflows, troubleshooting
+├── shortcuts.md                    ← daily keybindings, workflows, troubleshooting
 ├── system-state-findings.md       ← audit: planned setup vs. reality
 ├── finish-installation-commands.md← step-by-step remediation for flagged issues
 ├── cachyos-hyprland-setup.md      ← original install plan (now partially stale)
@@ -26,7 +26,7 @@ cachyPool/
 The docs were written at different times and **disagree with each other**. Trust them in this order:
 
 1. **`ACTUAL-CONFIGURATION.md`** — most recent, generated from a live system scan. The authoritative snapshot of installed packages, kernel state, the NVIDIA stack, monitors, and outstanding issues. **When older docs conflict with this, this wins.**
-2. **`shorcuts.md`** (typo intentional) — day-to-day usage reference: cheatsheet, full keybinding tables, workflows, Walker/Yazi/Kitty deep-dives, and troubleshooting.
+2. **`shortcuts.md`** — day-to-day usage reference: cheatsheet, full keybinding tables, workflows, Walker/Yazi/Kitty deep-dives, and troubleshooting.
 3. **`system-state-findings.md`** — audit comparing the planned setup against reality.
 4. **`finish-installation-commands.md`** — remediation steps for items flagged in the findings.
 5. **`cachyos-hyprland-setup.md`** — original install plan; some claims are now stale.
@@ -49,9 +49,11 @@ The docs were written at different times and **disagree with each other**. Trust
 
 ```
 eDP-1 (laptop, 0–2048px,    scale 1.25, 240Hz)
-DP-1  (Samsung, 2048–3968px, scale 1.00, 120Hz)  ← primary, workspace 1
-DP-2  (HDMI right, 3968–6016px, scale 1.25, 120Hz)
+DP-1  (Samsung¹, 2048–3968px, scale 1.00, 120Hz)  ← primary, workspace 1
+DP-2  (portable QHD 16", 3968–6016px, scale 1.25, 120Hz)
 ```
+
+¹ Replaced by a **Xiaomi 27" 4K** (`3840×2160@60`) on 2026-07-11. Live in the `read` profile (Xiaomi @ 3072×1728, scale 1.25); the static 3-across `desktop` geometry above is **pending re-fit**, and port names float (Xiaomi currently `DP-2`). See `ACTUAL-CONFIGURATION.md` §1/§15.
 
 Workspace mapping (`configs/hypr/monitors.conf`): WS 1–3 → DP-1, 4–5 → eDP-1, 6–9 → DP-2.
 
@@ -85,11 +87,12 @@ cp ~/.config/hypr/<file>.conf configs/hypr/<file>.conf
 
 These are easy to break and hard to debug:
 
-- **NVIDIA + Wayland requires KMS** — the kernel cmdline must contain `nvidia-drm.modeset=1 nvidia_drm.fbdev=1`, or Hyprland black-screens.
+- **NVIDIA + Wayland requires KMS** — satisfied by the 610-series driver default plus early module loading via `/etc/mkinitcpio.conf.d/10-chwd.conf`; the kernel cmdline no longer carries `nvidia-drm.modeset=1` (2026-07-02).
+- **The compositor and all three monitors run on the Intel iGPU** — the NVIDIA dGPU is offload-only and frequently dead after suspend/resume (GSP bug, `ACTUAL-CONFIGURATION.md` §15).
 - **Limine, not GRUB** — persistent cmdline edits go in `/etc/default/limine`, then `sudo limine-mkinitcpio`. Direct edits to `/boot/limine.conf` get wiped on the next kernel update or snapshot.
-- The **LTS kernel entry still lacks the NVIDIA modeset params** — booting `linux-cachyos-lts` black-screens Hyprland (open issue, see `ACTUAL-CONFIGURATION.md` §15).
+- The **LTS kernel entry** (`linux-cachyos-lts 6.18.35`) is the escape hatch for the i915 hang-recovery bug in kernel 7.0.12 — the old "missing modeset params" worry is obsolete (KMS is driver-default + early-KMS, kernel-agnostic), but verify/boot-test the entry once (`ACTUAL-CONFIGURATION.md` §15).
 - **Hardware cursor is disabled** (`look.conf`) to avoid NVIDIA artifacts.
-- `env.conf` carries the NVIDIA/Qt/Wayland env vars — removing any may break VAAPI, Electron apps, or Firefox on Wayland.
+- `env.conf` routes VA-API to the iGPU (`LIBVA_DRIVER_NAME=iHD`, 2026-07-02) plus the NVIDIA GLX/GBM and toolkit vars. ⚠ These only reach Hyprland-spawned processes — Walker-launched apps never see them (Firefox's video-decode pause therefore lives in its `user.js`, see `finish-installation-commands.md` §12).
 - **`Super+Shift+Q` restarts the compositor**, it does not log out — exiting Hyprland drops to tty1, where getty re-autologins and re-launches it. To truly log out: `Ctrl+Alt+F2`, then `loginctl terminate-user isalgado`.
 
 ## Replicating this setup

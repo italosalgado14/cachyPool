@@ -1,0 +1,14 @@
+# Installed to ~/.local/share/applications/shortcuts.desktop
+# Adds a "Shortcuts" entry to the Walker launcher (Elephant desktopapplications
+# provider). Selecting it opens the curated cheatsheet from
+# ~/.config/hypr/scripts/show-shortcuts.sh in a floating Kitty window.
+[Desktop Entry]
+Type=Application
+Name=Shortcuts
+GenericName=Keybinding cheatsheet
+Comment=Registry of the most useful Hyprland / Walker shortcuts
+Exec=/home/isalgado/.config/hypr/scripts/show-shortcuts.sh
+Icon=input-keyboard
+Terminal=false
+Categories=Utility;Documentation;
+Keywords=shortcuts;keybindings;cheatsheet;hotkeys;keys;hyprland;help;

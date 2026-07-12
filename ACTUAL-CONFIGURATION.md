@@ -1,7 +1,7 @@
 # Actual System Configuration
 
 **Snapshot date:** 2026-05-21
-**Last updated:** 2026-05-26 (Two fixes: (1) Elephant/Walker — `graphical-session.target` never activates under this getty+`start-hyprland` session, so `elephant.service` never auto-started and Walker hung on "Waiting for elephant"; fixed by adding `exec-once = systemctl --user start elephant.service` to autostart.conf, §10 + §15 reflect it, see `finish-installation-commands.md` §7e.ii–iii. (2) VS Code OS-keyring notification silenced via `~/.config/code-flags.conf` → `--password-store=basic`; §7 editor row + §15 reflect it, see `finish-installation-commands.md` §7f). 2026-05-23 (Walker Elephant backend installed — hub + 9 providers from AUR at `2.21.0-1`, `~/.config/systemd/user/elephant.service` user unit written + enabled; §5/§10/§12/§15 reflect new state. Earlier same-day: verified live state matches mirrored configs; phantom DP-0 EDID warning logged; display-manager row rewritten — system now boots via `getty@tty1` autologin + fish `exec start-hyprland`, plasmalogin disabled per `finish-installation-commands.md` §10)
+**Last updated:** 2026-07-02 (Firefox-freeze root-cause + VA-API reroute: §3 refreshed — driver now `610.43.02`/`7.0.12-1`, KMS via driver-default + chwd early-KMS, dGPU confirmed **offload-only** with the compositor on the iGPU; `env.conf` `LIBVA_DRIVER_NAME` nvidia→iHD and `NVD_BACKEND` dropped; Firefox hardware decode paused via profile `user.js`; four new §15 rows — freeze incident, i915 `__gen8_ppgtt_clear` NULL-deref bug, NVIDIA GSP resume failure, iGPU-primary discovery. Details: `finish-installation-commands.md` §12). 2026-05-26 (Two fixes: (1) Elephant/Walker — `graphical-session.target` never activates under this getty+`start-hyprland` session, so `elephant.service` never auto-started and Walker hung on "Waiting for elephant"; fixed by adding `exec-once = systemctl --user start elephant.service` to autostart.conf, §10 + §15 reflect it, see `finish-installation-commands.md` §7e.ii–iii. (2) VS Code OS-keyring notification silenced via `~/.config/code-flags.conf` → `--password-store=basic`; §7 editor row + §15 reflect it, see `finish-installation-commands.md` §7f). 2026-05-23 (Walker Elephant backend installed — hub + 9 providers from AUR at `2.21.0-1`, `~/.config/systemd/user/elephant.service` user unit written + enabled; §5/§10/§12/§15 reflect new state. Earlier same-day: verified live state matches mirrored configs; phantom DP-0 EDID warning logged; display-manager row rewritten — system now boots via `getty@tty1` autologin + fish `exec start-hyprland`, plasmalogin disabled per `finish-installation-commands.md` §10)
 **Hostname:** triton500se
 **User:** isalgado
 
@@ -27,17 +27,23 @@ This is an honest dump of the current state of the machine: hardware, OS, kernel
 
 ### Display setup (live from `hyprctl monitors`)
 
-| Output | Model | Native | Scale | Effective | Position | Rate |
-|---|---|---|---|---|---|---|
-| `eDP-1` | BOE 0x0AB5 (built-in 16") | 2560×1600 | 1.25 | 2048×1280 | `0×0` | 240 Hz |
-| `DP-1` | Samsung LS24F32xG | 1920×1080 | 1.00 | 1920×1080 | `2048×0` | 120 Hz |
-| `DP-2` | HDMI (RTK adapter) | 2560×1600 | 1.25 | 2048×1280 | `3968×0` | 120 Hz |
+| Output | Model | Native | Scale | Effective | Rate |
+|---|---|---|---|---|---|
+| `eDP-1` | BOE 0x0AB5 (built-in 16") | 2560×1600 | 1.25 | 2048×1280 | 240 Hz |
+| desk primary | **Xiaomi Mi Monitor 27" 4K** (replaced Samsung LS24F32xG FHD 24", 2026-07-11) | 3840×2160 | 1.25 | 3072×1728 | 60 Hz |
+| portable | RTK-adapter QHD 16" | 2560×1600 | 1.25 | 2048×1280¹ | 120 Hz |
 
-Total virtual desktop width: **6016 px**. No overlap, no gap.
+¹ 1280×2048 (portrait) when rotated in the `read` layout.
 
-The table above is the static `desktop` layout. As of 2026-06-10 the live arrangement
-is chosen automatically by a hotplug daemon (`read` / `onescreen` / `laptop`) — see
-§11 "Monitor profiles & auto-switching".
+**Port names float** with plug order — currently Xiaomi = `DP-2`, portable = `DP-1`. The
+`read`/`trio` profiles resolve panels by capability, not by `DP-*` name, so they follow
+the swap automatically (verified live 2026-07-11: `read` drives the Xiaomi at 3072×1728,
+scale 1.25). The live arrangement is chosen by a hotplug daemon (`trio` / `read` /
+`onescreen` / `laptop`) — see §11 "Monitor profiles & auto-switching".
+
+⚠ The static 3-across `desktop` profile (`monitors.conf`) still hardcodes the old Samsung
+(`DP-1 1920×1080@120`) plus a `DP-2 2560×1600` slot the Xiaomi **cannot** do — it needs
+re-fitting for the Xiaomi before `Super+M → desktop` is usable again. Tracked in §15.
 
 ---
 
@@ -76,13 +82,14 @@ nvidia-drm.modeset=1 nvidia_drm.fbdev=1
 
 | Item | Value |
 |---|---|
-| Driver | 595.71.05 (proprietary, via `linux-cachyos-nvidia-open`) |
+| Driver | 610.43.02 (open GSP kernel modules, via `linux-cachyos-nvidia-open`) — updated 2026-07-02, was 595.71.05 |
 | Kernel modules loaded | `nvidia`, `nvidia_drm`, `nvidia_modeset`, `nvidia_uvm` |
-| Module package | `linux-cachyos-nvidia-open 7.0.9-1` (CachyOS-specific; not `nvidia-dkms`) |
-| Userspace | `nvidia-utils 595.71.05-1`, `lib32-nvidia-utils`, `libva-nvidia-driver`, `egl-wayland` |
-| KMS | ✅ enabled (`nvidia-drm.modeset=1`) |
+| Module package | `linux-cachyos-nvidia-open 7.0.12-1` (CachyOS-specific; not `nvidia-dkms`) |
+| Userspace | `nvidia-utils 610.43.02-3`, `lib32-nvidia-utils 610.43.02-1`, `egl-wayland 4:1.1.21`. `libva-nvidia-driver` removed 2026-07-02 (`finish-installation-commands.md` §12d) |
+| Role | **Offload-only (discovered 2026-07-02).** The compositor and all three outputs run on the Intel iGPU — aquamarine primary DRM = `card2` (i915), renderer on `renderD129`; the dGPU (`card1`) is a secondary KMS backend whose own connectors (`eDP-2`, `HDMI-A-1`) are unused |
+| KMS | ✅ enabled — `modeset` is the driver default on the 610 series, and the modules early-load from initramfs via `/etc/mkinitcpio.conf.d/10-chwd.conf` (`MODULES+=(nvidia nvidia_modeset nvidia_uvm nvidia_drm)`). The kernel cmdline no longer carries `nvidia-drm.modeset=1` (verified `/proc/cmdline` 2026-07-02); the mechanism is kernel-agnostic, so it covers the LTS entry too |
 | Hardware cursor | disabled in Hyprland config (`cursor.no_hardware_cursors = true` to avoid NVIDIA artifacts) |
-| Wayland env vars (set in `env.conf`) | `LIBVA_DRIVER_NAME=nvidia`, `__GLX_VENDOR_LIBRARY_NAME=nvidia`, `GBM_BACKEND=nvidia-drm`, `NVD_BACKEND=direct`, `MOZ_ENABLE_WAYLAND=1`, `ELECTRON_OZONE_PLATFORM_HINT=auto` |
+| Wayland env vars (set in `env.conf`) | `LIBVA_DRIVER_NAME=iHD` (2026-07-02, was `nvidia`; `NVD_BACKEND=direct` dropped with the shim), `__GLX_VENDOR_LIBRARY_NAME=nvidia`, `GBM_BACKEND=nvidia-drm`, `MOZ_ENABLE_WAYLAND=1`, `ELECTRON_OZONE_PLATFORM_HINT=auto`. ⚠ Only processes Hyprland spawns (keybinds/`exec-once`) see these — Walker/Elephant launches apps from the systemd `--user` manager, which doesn't (verified 2026-07-02: the running Firefox had none of them in its environ) |
 
 ---
 
@@ -153,6 +160,7 @@ nvidia-drm.modeset=1 nvidia_drm.fbdev=1
 | `micro` | 2.0.15-2.1 | Terminal text editor (Yazi's default for text files) |
 | `dolphin` | 26.04.1-1.1 | KDE file manager (GUI fallback) |
 | `firefox` | 150.0.3-1 | Default browser |
+| `obsidian` | 1.12.7-3 | Markdown knowledge base / notes. Repo pkg (`extra`), installed 2026-07-08. Ships `/usr/share/applications/obsidian.desktop`, so it auto-appears in Walker — elephant hot-reloaded, no restart needed (verified via `elephant query 'desktopapplications;obsidian;5'`). Nothing added to `configs/applications/`; that mirror is only for custom entries like `shortcuts.desktop`. |
 
 > Not installed: `neovim`, `ghostty` (Ghostty is in CachyOS repos if you want to swap in for Kitty later).
 
@@ -171,9 +179,9 @@ nvidia-drm.modeset=1 nvidia_drm.fbdev=1
 
 ## 9. Installed Packages — Counts
 
-- **Explicitly installed (user-requested):** 267 (was 251 before the Walker/Elephant install on 2026-05-23)
-- **Total installed (with dependencies):** 1324 (was 1304)
-- **Foreign / AUR packages:** 11 (`pacman -Qm`) — includes `elephant` + 9 providers (all `2.21.0-1`) and `visual-studio-code-bin`
+- **Explicitly installed (user-requested):** 271 (was 267 on 2026-05-23; +Obsidian on 2026-07-08, plus a few other installs in between)
+- **Total installed (with dependencies):** 1357 (was 1324)
+- **Foreign / AUR packages:** 11 (`pacman -Qm`) — includes `elephant` + 9 providers (all `2.21.0-1`) and `visual-studio-code-bin`. Obsidian is **not** here — it's a repo package from `extra`.
 
 Get the full explicit list with `pacman -Qe`. Get only foreign packages (AUR/manual) with `pacman -Qm`.
 
@@ -190,11 +198,11 @@ Captured via `pgrep -af`:
 | `hyprpaper` | `exec-once = hyprpaper` |
 | `hypridle` | `exec-once = hypridle` |
 | `hyprpolkitagent` | `exec-once = systemctl --user start hyprpolkitagent.service` |
-| `swayosd-server` | `exec-once = swayosd-server` |
+| `swayosd-server` | `exec-once = systemctl --user start swayosd.service` (autostart.conf). **Changed 2026-06-17** from a bare `exec-once = swayosd-server`: swayosd 0.3.1 SIGABRTs on every monitor-set change (gtk4-layer-shell re-init on the GdkDisplay "monitors changed" signal), so the `read` profile disabling eDP-1 — or any hotplug — killed it, and a bare exec-once never came back, taking the volume/brightness OSD and the media keys with it. Now a `Restart=always` user unit at `~/.config/systemd/user/swayosd.service` (mirrored in `configs/systemd/user/`); `monitor-mode.sh` also restarts it after each switch. See §15. |
 | `wl-paste --type text --watch cliphist store` | autostart |
 | `wl-paste --type image --watch cliphist store` | autostart |
 | `nm-applet --indicator` | autostart |
-| `monitor-autoswitch.sh` (+ child `socat` on `.socket2`) | `exec-once = ~/.config/hypr/scripts/monitor-autoswitch.sh` (autostart.conf). Long-lived; auto-selects the monitor profile (`read` / `onescreen` / `laptop`) on each hotplug event. See §11 "Monitor profiles & auto-switching". Added 2026-06-10. |
+| `monitor-autoswitch.sh` (+ child `socat` on `.socket2`) | `exec-once = ~/.config/hypr/scripts/monitor-autoswitch.sh` (autostart.conf). Long-lived; auto-selects the monitor profile (`trio` / `read` / `onescreen` / `laptop`) on each hotplug event. See §11 "Monitor profiles & auto-switching". Added 2026-06-10. |
 | `walker --gapplication-service` | autostart (resident service for fast launches) |
 | `elephant` | `exec-once = systemctl --user start elephant.service` (autostart.conf). The user unit at `~/.config/systemd/user/elephant.service` exists (written 2026-05-23; AUR pkg ships none) but is `WantedBy=graphical-session.target`, which **never activates** under this getty-autologin + `start-hyprland` session — so it's started explicitly from autostart.conf instead (fixed 2026-05-26; before that Walker hung on "Waiting for elephant"). Backs every Walker prefix/`-m <mode>` invocation. |
 | `polkitd` | system (PolicyKit daemon) |
@@ -215,15 +223,17 @@ env.conf           ← NVIDIA + Qt + cursor env vars
 monitors.conf      ← 3-monitor layout, scale 1.25 on 2560×1600 outputs
 input.conf         ← keyboard layout, touchpad, 3-finger gesture
 look.conf          ← Catppuccin Mocha colors, dwindle, animations, blur+shadow
-keybindings.conf   ← every shortcut (see shorcuts.md)
+keybindings.conf   ← every shortcut (see shortcuts.md)
 windowrules.conf   ← floats for dialogs (pavucontrol, blueman, polkit, PiP)
 autostart.conf     ← exec-once for all daemons
 hyprpaper.conf     ← block-syntax wallpaper bindings (workaround for 0.8.4 parser bug)
 hyprlock.conf      ← Catppuccin password input + big clock + blurred wallpaper
 hypridle.conf      ← 5m lock / 10m DPMS / 20m suspend
-monitors-read.conf ← alternate "read" profile (portable rotated portrait); NOT sourced, applied live
-scripts/monitor-mode.sh        ← apply a named layout: desktop|read|laptop|onescreen|toggle
+monitors-read.conf ← alternate "read" profile (portrait external, laptop OFF); NOT sourced, applied live
+monitors-trio.conf ← alternate "trio" profile (both 16" portables + laptop centered); NOT sourced, reference only — monitor-mode.sh resolves the geometry by capability (added 2026-07-08)
+scripts/monitor-mode.sh        ← apply a named layout: desktop|read|laptop|onescreen|trio|toggle
 scripts/monitor-autoswitch.sh  ← daemon: auto-picks layout from connected displays (autostart.conf)
+scripts/show-shortcuts.sh      ← curated keybinding cheatsheet in a floating Kitty window (Super+/ and the "Shortcuts" Walker entry; added 2026-06-17)
 ```
 
 ### Monitor profiles & auto-switching (added 2026-06-10)
@@ -235,19 +245,29 @@ hotplug events and applies a profile based on what is connected:
 
 | Connected displays | Auto-applied profile | Arrangement (left → right) |
 |---|---|---|
-| DP-1 + DP-2 (both externals) | **`read`** | Samsung FHD · portable QHD **rotated 270° (portrait)** · laptop |
-| Exactly one external (DP-1 **or** DP-2) | **`onescreen`** | that external (landscape) · laptop |
+| Two externals incl. the **demoset** FHD portable | **`trio`** (added 2026-07-08) | FHD portable · **laptop (center)** · portable QHD — all landscape |
+| Two externals otherwise (desk external + portable QHD) | **`read`** | desk external landscape (now the **Xiaomi 27" 4K** @ 3072×1728, scale 1.25) · portable QHD **rotated 270° (portrait)** · **laptop OFF** |
+| Exactly one external | **`onescreen`** | that external (landscape) · laptop |
 | No externals (integrated only) | **`laptop`** | `eDP-1` alone at `0×0` |
 | — | **`desktop`** | **never auto** — manual only, via `Super+M` |
 
+Externals are counted as "any monitor that isn't `eDP-1`"; the demoset portable is matched by its EDID `description` (not by port name).
+
 - Geometry for every profile lives in **`scripts/monitor-mode.sh`** (single source of
   truth; the daemon only decides *which* profile to call). It can also be run by hand:
-  `~/.config/hypr/scripts/monitor-mode.sh {desktop|read|laptop|onescreen}`.
-- **`Super+M`** (in `keybindings.conf`) toggles **desktop ↔ read** manually. A manual
-  choice holds until the next hotplug event, when the daemon re-asserts the automatic
-  profile for the current display set.
-- `read` rotates the portable (DP-2) with `transform, 3` → 1280×2048 logical column for
-  reading pages. `onescreen` keeps whichever single external in landscape.
+  `~/.config/hypr/scripts/monitor-mode.sh {desktop|read|laptop|onescreen|trio}`.
+- The `read` and `trio` profiles **resolve the externals by capability, not port name**
+  (the QHD portable is whichever external can do `2560×1600`; the other external takes its
+  best resolution+refresh). This keeps them correct on the road, where DP-1/DP-2 shift
+  with plug order. `desktop`/`onescreen` still use fixed DP-* geometry.
+- **`Super+M`** (in `keybindings.conf`) toggles manually: **read ↔ desktop** at the desk,
+  **read ↔ trio** on the road (it prefers `trio` over `desktop` when the demoset FHD
+  portable is connected). A manual choice holds until the next *external* hotplug event,
+  when the daemon re-asserts the automatic profile. `eDP-1` add/remove events are ignored,
+  so toggling the laptop panel between profiles isn't instantly reverted.
+- `read` rotates the QHD portable with `transform, 3` → 1280×2048 logical column for
+  reading pages (laptop off). `trio` is both 16" portables plus the laptop, three across
+  with the laptop centered. `onescreen` keeps whichever single external in landscape.
 - State is tracked in `$XDG_RUNTIME_DIR/hypr-monitor-mode`; the daemon re-applies only
   when the desired profile differs from the current one (no notification spam).
 
@@ -302,21 +322,28 @@ These are tracked in `system-state-findings.md` and `finish-installation-command
 | Waybar Catppuccin config | ✅ Applied (`~/.config/waybar/config.jsonc` + `style.css`) |
 | Hyprpaper wallpaper binding | ✅ Resolved via block syntax (workaround for 0.8.4 config parser bug — see GitHub hyprwm/hyprpaper#204 + Arch forum thread) |
 | Hyprlock styling | ✅ Catppuccin theme applied |
-| Hypridle timeouts | ✅ Configured (5/10/20 min) |
+| Hypridle timeouts | ✅ Configured (5/10/20 min). **2026-07-12:** the 20-min suspend listener is now **battery-only** (`grep -q Discharging /sys/class/power_supply/BAT1/status && systemctl suspend` — `BAT1` status covers barrel AC, USB-C PD and dock power, unlike `ACAD/online`) after that day's resume-from-s2idle crash (GSP row below). On external power the machine still locks (5 min) + DPMS-off (10 min) but stays awake |
 | qt6ct env var | ✅ Package installed, env var valid |
 | Kitty Catppuccin theme | ✅ Applied |
 | Yazi config | ✅ Working on defaults (no custom config needed; image previews via Kitty auto-detected) |
-| Walker config | ✅ Elephant-backed (2026-05-23) — hub + 9 providers (apps, calc, runner, files, symbols, clipboard, websearch, providerlist, menus) from AUR; user unit at `~/.config/systemd/user/elephant.service`. Verified: `walker -m clipboard` and `walker -m symbols` open working UIs. `~/.config/walker/config.toml` and `~/.config/elephant/*.toml` not yet written — running on Elephant defaults (websearch prefix is `@`; `shorcuts.md` §1.2 and §4 reflect this). §7e.iv–v in `finish-installation-commands.md` pins these if desired. **Startup fix 2026-05-26:** the unit was `enabled` but `WantedBy=graphical-session.target`, which never activates under this getty+`start-hyprland` session, so elephant never started and Walker hung on "Waiting for elephant". Now started explicitly via `exec-once = systemctl --user start elephant.service` in autostart.conf (see §7e.ii–iii). |
+| Walker config | ✅ Elephant-backed (2026-05-23) — hub + 9 providers (apps, calc, runner, files, symbols, clipboard, websearch, providerlist, menus) from AUR; user unit at `~/.config/systemd/user/elephant.service`. Verified: `walker -m clipboard` and `walker -m symbols` open working UIs. `~/.config/walker/config.toml` and `~/.config/elephant/*.toml` not yet written — running on Elephant defaults (websearch prefix is `@`; `shortcuts.md` §1.2 and §4 reflect this). §7e.iv–v in `finish-installation-commands.md` pins these if desired. **Startup fix 2026-05-26:** the unit was `enabled` but `WantedBy=graphical-session.target`, which never activates under this getty+`start-hyprland` session, so elephant never started and Walker hung on "Waiting for elephant". Now started explicitly via `exec-once = systemctl --user start elephant.service` in autostart.conf (see §7e.ii–iii). |
 | VS Code OS-keyring notification | ✅ Resolved — `~/.config/code-flags.conf` sets `--password-store=basic` so VS Code skips the missing Secret Service backend (no keyring daemon in this Hyprland session). Trade-off: secrets stored in an obfuscated local file, not keyring-encrypted. Details + revert path: `finish-installation-commands.md` §7f. |
-| HiDPI scaling | ✅ Scale 1.25 on eDP-1 and DP-2; positions recalculated |
-| LTS kernel cmdline | ⚠ Still missing `nvidia-drm.modeset=1` on `linux-cachyos-lts` entry |
+| HiDPI scaling | ✅ Scale 1.25 on eDP-1, the portable QHD, and (since 2026-07-11) the Xiaomi 27" 4K (`3840×2160` → 3072×1728); positions recalculated |
+| LTS kernel cmdline | 🔧 Reframed 2026-07-02 — the modeset worry is obsolete: `modeset` is the 610-series driver default and early-KMS comes from `/etc/mkinitcpio.conf.d/10-chwd.conf`, both kernel-agnostic; even the main entry's cmdline no longer carries `nvidia-drm.modeset=1`. Remaining: verify the LTS entry carries `thunderbolt.host_reset=0` + `mem_sleep_default=s2idle` (`sudo grep -i -B2 -A8 lts /boot/limine.conf`) and boot-test it once — LTS `6.18.35` is the escape hatch for the i915 `7.0.12` NULL-deref row below |
 | Thunderbolt boot hang | ✅ Resolved 2026-05-22 — `thunderbolt.host_reset=0` on `linux-cachyos` cmdline, `plymouth` removed from `HOOKS=`, `quiet splash` dropped. TB4 dock now boots cleanly. Details: `finish-installation-commands.md` §6.0. ⚠ LTS entry still missing the same param. |
+| `quiet splash` / plymouth regression | ✅ Re-reverted 2026-06-11 — both had been re-added that day (`KERNEL_CMDLINE[default]+=" quiet splash"` in `/etc/default/limine` + `plymouth` back in mkinitcpio `HOOKS=`) to hide boot-console text, which reintroduced boot problems. Removed both and ran `sudo limine-mkinitcpio` (rebuilt `linux-cachyos` + `linux-cachyos-lts`, regenerated `/boot/limine.conf`). Backups: `/etc/default/limine.bak-20260611`, `/etc/mkinitcpio.conf.bak-20260611`. Plymouth shutdown units remain masked. This restores the 2026-05-22 TB-boot-fix state — do not re-add `quiet splash` or the `plymouth` hook. |
 | Thunderbolt shutdown hang | ✅ Resolved 2026-05-22 — `nvidia-{suspend,resume,hibernate}` enabled; `NVreg_PreserveVideoMemoryAllocations=1` + `/var/tmp` spill via `/etc/modprobe.d/nvidia-power-management.conf`; Plymouth shutdown units masked; `DefaultTimeoutStopSec=15s` (diagnostic). Details: `finish-installation-commands.md` §6.0. |
-| NVIDIA black-screen on resume from suspend | 🔧 Fix applied 2026-05-26 — resume from **deep (S3)** suspend crashed the NVIDIA open module (595.71.05). On the 2026-05-26 21:38 resume: `nvidia-drm: Failed to detect display state` + **333 `NVRM:` MMU-walk assertion failures** (`mmuWalkUnmap`/`mmuWalkSparsify` → `NV_ERR_INVALID_STATE`) wedged the display engine → screen stayed black while the system kept running headless → forced power-off at 21:44 (journal ends mid-line on a WiFi rekey, no shutdown sequence). Same `Failed to detect display state` seen milder (2 errors, recovered) on the 2026-05-25 19:15 resume, so it's recurring. `NVreg_PreserveVideoMemoryAllocations=1`, `/var/tmp` spill, and `nvidia-{suspend,resume,hibernate}` were **all already correctly set** — this is a driver-level S3-resume bug, not a misconfig. **Fix:** force `s2idle` instead of S3 via `mem_sleep_default=s2idle` appended to the `linux-cachyos` cmdline in `/etc/default/limine`, then `sudo limine-mkinitcpio`. Live-applied 2026-05-26 (`/sys/power/mem_sleep` now `[s2idle] deep`); persist + verify steps in `finish-installation-commands.md` §11. ⚠ LTS entry not updated. Re-evaluate if a newer NVIDIA driver fixes S3 resume. |
+| NVIDIA black-screen on resume from suspend | 🔧 Fix applied 2026-05-26 — resume from **deep (S3)** suspend crashed the NVIDIA open module (595.71.05). On the 2026-05-26 21:38 resume: `nvidia-drm: Failed to detect display state` + **333 `NVRM:` MMU-walk assertion failures** (`mmuWalkUnmap`/`mmuWalkSparsify` → `NV_ERR_INVALID_STATE`) wedged the display engine → screen stayed black while the system kept running headless → forced power-off at 21:44 (journal ends mid-line on a WiFi rekey, no shutdown sequence). Same `Failed to detect display state` seen milder (2 errors, recovered) on the 2026-05-25 19:15 resume, so it's recurring. `NVreg_PreserveVideoMemoryAllocations=1`, `/var/tmp` spill, and `nvidia-{suspend,resume,hibernate}` were **all already correctly set** — this is a driver-level S3-resume bug, not a misconfig. **Fix:** force `s2idle` instead of S3 via `mem_sleep_default=s2idle` appended to the `linux-cachyos` cmdline in `/etc/default/limine`, then `sudo limine-mkinitcpio`. Live-applied 2026-05-26 (`/sys/power/mem_sleep` now `[s2idle] deep`); persist + verify steps in `finish-installation-commands.md` §11. ⚠ LTS entry not updated. Re-evaluate if a newer NVIDIA driver fixes S3 resume. **2026-07-02:** s2idle avoids the hard display wedge, but the 20:48 resume failed dGPU GSP re-init (`kgspWaitForRmInitDone → Reset required`) — dGPU dead until reboot; the session survives because the compositor runs on the iGPU. Tracked in the dedicated GSP row below. |
 | Leftover Windows/Ubuntu partitions | ℹ️ Intentionally retained — `nvme1n1p3` (NTFS 559 GiB) + `nvme1n1p4` (ext4 393 GiB) keep other OS docks/data. Cleanup section removed from `finish-installation-commands.md` on 2026-05-22. |
 | SDDM X11 workaround | N/A — no display manager (boot via `getty@tty1` autologin + fish `exec start-hyprland`); `plasmalogin` disabled 2026-05-22 per `finish-installation-commands.md` §10 |
 | Phantom `DP-0` EDID warning at boot | ℹ️ Benign — NVIDIA logs `nvidia-modeset: WARNING: GPU:0: Unable to read EDID for display device DP-0` because nothing is plugged into that connector. The three real outputs (`eDP-1`, `DP-1`, `DP-2`) come up cleanly. No action needed. |
-| `DP-2` (RTK HDMI adapter) reports garbage EDID | ℹ️ Cosmetic — Hyprland shows `Invalid Vendor Codename - RTK HDMI 0x01010101`. Modes are still detected correctly; runs at 2560×1600@120 as expected. |
+| Desktop 3-across profile not re-fitted for the Xiaomi | 🔧 Pending (2026-07-11) — the Samsung FHD 24" was swapped for a **Xiaomi Mi Monitor 27" 4K** (`3840×2160@60`). The capability-based `read`/`trio` profiles already handle it (Xiaomi @ 3072×1728, scale 1.25 — live-verified), but `monitors.conf`/`apply_desktop` still hardcode `DP-1 1920×1080@120` + a `DP-2 2560×1600` slot the Xiaomi can't do, so `Super+M → desktop` will misbehave. Re-fit `apply_desktop` (capability-based, Xiaomi centre/primary) + `monitors.conf` when the desk 3-across layout is next needed. |
+| RTK HDMI adapter reports garbage EDID | ℹ️ Cosmetic — Hyprland shows `Invalid Vendor Codename - RTK HDMI 0x01010101` for the portable QHD (currently `DP-1`; port floats). Modes still detected correctly; runs at 2560×1600@120 as expected. (The Xiaomi on `DP-2` reports a clean `Xiaomi Corporation Mi Monitor` EDID.) |
+| Volume/brightness OSD + media keys dead after a monitor switch | ✅ Resolved 2026-06-17 — root cause was `swayosd-server` 0.3.1 SIGABRTing whenever the monitor set changes (backtrace: `gtk_layer_init_for_window` → `wl_display_roundtrip_queue` → `abort`, fired from the GTK "monitors changed" signal). It runs fine *sitting* in any layout but dies *during* the transition, so switching into the `read` profile (which disables `eDP-1`) — or any hotplug — left the server dead and, since it was a bare `exec-once`, nothing revived it: no OSD, and the media keys (which route through `swayosd-client` → server) stopped changing volume entirely. **Fix:** moved it to a `Restart=always` systemd `--user` unit (`~/.config/systemd/user/swayosd.service`, mirrored in `configs/systemd/user/`), launched via `exec-once = systemctl --user start swayosd.service`; `monitor-mode.sh` also runs `systemctl --user restart swayosd.service` after applying each layout so a healthy server is bound to the new monitor set. Verified by simulating the crash (`kill -ABRT`) → systemd revived it; restart path and `swayosd-client` volume both confirmed. Also wired the Waybar `pulseaudio` module's scroll (and middle-click mute) through `swayosd-client` so scrolling the bar shows the OSD too. Upstream bug — re-evaluate the workaround if a newer swayosd survives monitor hotplug. |
+| Firefox freeze 2026-07-02 21:10 — whole session wedged | 🔧 Mitigated 2026-07-02 — journal (boot `8790fdd2`) shows two **independent** failures: (1) 20:48 resume → dGPU GSP re-init failed (dedicated row below) → 384 NVRM errors this boot (344/359 the two prior), incl. `vaspaceapiConstruct: Could not construct VA space` at 20:57 — a GPU *virtual-address-space* error on the dead dGPU, **not** the VA-API video shim. (2) At 21:10 Firefox's `MediaPD~der` hung the **iGPU** video engine 3× (`i915 GPU HANG ecode 12:4`) and i915's hang-recovery NULL-dereffed in `__gen8_ppgtt_clear` (row below) → GPU memory management wedged → freeze. Key finding: Walker/Elephant launches Firefox from the systemd `--user` env, so `LIBVA_DRIVER_NAME=nvidia` never reached it — Firefox was already hardware-decoding on the iGPU; the NVIDIA shim was dead config. **Fixes:** `env.conf` VA-API → `iHD` + `NVD_BACKEND` dropped (repo+live); Firefox hardware decode paused via `~/.config/mozilla/firefox/31yk9hxe.default-release/user.js` (`media.ffmpeg.vaapi.enabled=false`) until the i915 bug is fixed; `libva-nvidia-driver` removed (confirmed gone 2026-07-02). Details/verify/revert: `finish-installation-commands.md` §12 |
+| i915 NULL deref in `__gen8_ppgtt_clear` during GPU-hang recovery | ⚠ Open — kernel `7.0.12-1-cachyos` bug: a video-engine hang should end in a context reset, but recovery crashed (`BUG: kernel NULL pointer dereference … RIP: __gen8_ppgtt_clear+0x1da [i915]`, 2026-07-02 21:10), wedging GPU memory management until reboot. Mitigation: keep Firefox on software decode (§12c of `finish-installation-commands.md`). Escape hatch: `linux-cachyos-lts 6.18.35`. Re-test hardware decode after the next kernel bump (§12f) |
+| NVIDIA GSP "Reset required" after s2idle resume | ⚠ Open — driver `610.43.02` (open GSP modules): the 2026-07-02 20:48 resume failed `kgspWaitForRmInitDone` → dGPU unusable until reboot; every client touching it afterwards logs NVRM errors (384/344/359 across the last three suspend-cycle boots; a boot without a suspend logged 0). ~~Impact contained~~ **2026-07-12 escalation — no longer contained:** after ~4 h in s2idle (hypridle auto-suspend 14:22 → wake 18:24, kernel `7.1.2-3-cachyos`), resume failed `gpuPowerManagementResume: GSP boot failed at resume (bootMode 0x1): 0x62` and this time **crashed `nvidia_modeset` mid-resume** (page-fault oops in `FreeDeviceReference` inside `nvkms_resume`; `systemd-sleep` "exited with irqs disabled", SIGKILLed; `systemd-suspend.service` failed). Collateral: TB4 bridge `02:00.0` (Goshen Ridge dock) "not ready 1023ms after resume; giving up" → entire downstream tree (USB, r8152 Ethernet, dock displays) torn down; Hyprland lost all outputs (`hyprpolkitagent: There are no outputs`) → black screen on every panel incl. eDP-1; processes went SIGKILL-immune (`snapper-cleanup: Processes still around after SIGKILL`) → forced power-off ~18:52. i915 logged zero errors — purely the NVIDIA resume path. `PreserveVideoMemoryAllocations=1` + `/var/tmp` spill + nvidia-{suspend,resume} services all ran correctly; driver/firmware bug, not misconfig. **Mitigation 2026-07-12:** hypridle 20-min suspend is now battery-only (Hypridle row above), and logind lid-switch on external power set to ignore. Untried escalations if suspend-on-battery also crashes: `NVreg_EnableS0ixPowerManagement=1` (currently `0`; NVIDIA's recommended mode for s2idle laptops) or `NVreg_DynamicPowerManagement=0x00` (keep dGPU powered). Re-test on each driver update past 610.43.02 |
+| Compositor renders on the Intel iGPU, not the dGPU | ℹ️ Discovery 2026-07-02 — aquamarine log: `card2` (i915) "becomes primary drm", `CDRMRenderer on renderD129`; all three monitors are iGPU connectors. Older docs' "NVIDIA-primary" framing is wrong. Consequence: `GBM_BACKEND=nvidia-drm` + `__GLX_VENDOR_LIBRARY_NAME=nvidia` in `env.conf` force Hyprland-spawned GL clients onto a dGPU that's offload-only (cross-GPU copies; often dead post-resume) — left untouched for now, evaluate removing them separately |
 
 ---
 
@@ -328,7 +355,7 @@ cachyPool/
 ├── spected-installation.md            ← expected/recommended stack
 ├── system-state-findings.md           ← scan report after install
 ├── finish-installation-commands.md    ← step-by-step remediation
-├── shorcuts.md                        ← daily shortcuts + workflows + Walker/Yazi/Kitty + troubleshooting (merged 2026-05-23, replaces the old USABILITY.md)
+├── shortcuts.md                        ← daily shortcuts + workflows + Walker/Yazi/Kitty + troubleshooting (merged 2026-05-23, replaces the old USABILITY.md)
 ├── ACTUAL-CONFIGURATION.md            ← this file
 └── configs/                           ← live copies of all dotfiles
     ├── hypr/
@@ -346,13 +373,18 @@ cachyPool/
     │   ├── windowrules.conf
     │   └── scripts/
     │       ├── monitor-mode.sh        ← apply a named layout
-    │       └── monitor-autoswitch.sh  ← hotplug auto-switch daemon
+    │       ├── monitor-autoswitch.sh  ← hotplug auto-switch daemon
+    │       └── show-shortcuts.sh      ← keybinding cheatsheet popup (Super+/ + Walker "Shortcuts")
     ├── waybar/
     │   ├── config.jsonc
     │   └── style.css
-    └── kitty/
-        ├── kitty.conf
-        └── themes/
+    ├── kitty/
+    │   ├── kitty.conf
+    │   └── themes/
+    ├── applications/                  ← mirrors ~/.local/share/applications/
+    │   └── shortcuts.desktop          ← "Shortcuts" Walker launcher entry
+    └── systemd/user/                  ← mirrors ~/.config/systemd/user/
+        └── swayosd.service            ← Restart=always OSD server (survives monitor switches)
             └── Catppuccin-Mocha.conf
 ```
 
