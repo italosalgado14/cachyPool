@@ -31,7 +31,7 @@ window#waybar {
     color: #cba6f7;
 }
 
-#window, #clock, #cpu, #memory, #battery, #network, #pulseaudio, #tray {
+#window, #clock, #cpu, #memory, #battery, #network, #bluetooth, #pulseaudio, #tray {
     padding: 0 12px;
     margin: 4px 2px;
     color: #cdd6f4;
@@ -44,4 +44,6 @@ window#waybar {
 #battery.warning { color: #fab387; }
 #battery.critical { color: #f38ba8; }
 #network { color: #94e2d5; }
+#bluetooth { color: #74c7ec; }
+#bluetooth.off, #bluetooth.disabled { color: #6c7086; }
 #pulseaudio { color: #cba6f7; }

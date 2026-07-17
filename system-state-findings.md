@@ -149,7 +149,7 @@ These were already known unfinished items per the plan; current scan confirms th
 - [ ] Set up hyprlock styling (no config)
 - [ ] Configure hypridle timeouts (no config + daemon not running)
 - [ ] Replace nm-applet with networkmanager_dmenu/rofi-network — currently nm-applet line in autostart is dead because the package isn't installed
-- [ ] Set up Bluetooth indicator — `bluez`/`bluez-utils` installed but no `blueman` GUI; `windowrules.conf` already has float rules for `blueman-manager` anticipating it
+- [x] Set up Bluetooth indicator — resolved 2026-07-17: `blueman` installed; Waybar `bluetooth` module added (`configs/waybar/config.jsonc`) — shows status + device battery, left-click opens `blueman-manager`, right-click `rfkill toggle bluetooth`
 - [ ] Battery/power profile management — `power-profiles-daemon 0.30-3` is installed (not `tlp` or `auto-cpufreq`); fine for laptops on Intel.
 - [ ] Snapshot strategy with snapper — `snapper`, `snap-pac`, `btrfs-progs` all installed. Worth checking `/etc/snapper/configs/` to confirm a root config exists and that pacman snapshots are wired up — not verified here.
 
