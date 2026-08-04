@@ -1,0 +1,5 @@
+# Written 2026-07-31 — see finish-installation-commands.md §13c
+# Hardware decode disabled: VLC default (avcodec-hw=any) routes VA-API -> iHD -> iGPU,
+# the path that tripped the i915 hang-recovery NULL deref on 2026-07-02.
+[avcodec]
+avcodec-hw=none

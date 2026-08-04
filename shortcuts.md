@@ -177,22 +177,30 @@ The compositor is **dwindle**: every new window splits the focused space in half
 ## 3. Multi-monitor layout (current)
 
 **Live right now** is the `read` profile (the desk auto-picks it): the **Xiaomi 27" 4K**
-landscape-left @ 3072×1728 (scale 1.25) · portable QHD rotated **portrait**-right · laptop off.
+landscape-left @ 3072×1728 (scale 1.25) · portable QHD rotated **portrait**-right (1280×2048
+logical) · laptop off.
 
-The static `desktop` 3-across profile below is the reference layout, but it **still holds the
-old Samsung geometry** and hasn't been re-fitted for the Xiaomi (see ⚠ after the table):
+The portable is a **VCHANCE AQ16H** 16", running native **2560×1600@120**. Hyprland labels it
+`Invalid Vendor Codename - RTK HDMI` because its Realtek scaler sends no vendor string — that
+is the panel's normal appearance, not a fault.
+
+The static `desktop` 3-across profile below is the reference layout. It was **re-fitted for
+the Xiaomi on 2026-08-03** (it previously held the retired Samsung's geometry):
 
 ```
-[ eDP-1 laptop ]  [ centre: was Samsung ]  [ portable QHD right ]
-  2048 × 1280        1920 × 1080  ⚠           2048 × 1280
-   scale 1.25         scale 1.00  ⚠            scale 1.25
-   0 – 2048px         2048 – 3968px ⚠         3968 – 6016px
-   240 Hz             120 Hz                  120 Hz
+[ eDP-1 laptop ]  [ Xiaomi 27" 4K centre ]  [ portable QHD right ]
+  2048 × 1280         3072 × 1728              2048 × 1280
+   scale 1.25          scale 1.25               scale 1.25
+   0 – 2048px          2048 – 5120px            5120 – 7168px
+   240 Hz              60 Hz                    120 Hz
 ```
 
-- **Desk primary is now the Xiaomi 27" 4K** (replaced the Samsung FHD 24", 2026-07-11) — workspace 1 lives there, new windows default to it.
+- **Desk primary is the Xiaomi 27" 4K** (replaced the Samsung FHD 24", 2026-07-11) — workspace 1 lives there, new windows default to it.
 - Workspaces 4 / 5 live on the laptop · 6–9 on the portable QHD (right).
-- ⚠ The centre slot's `1920×1080@120` is the old Samsung's; the Xiaomi is `3840×2160@60` and can't do the `2560×1600` DP-2 slot either — re-fit the `desktop` profile before using `Super+M → desktop`.
+- Monitors **and workspaces are bound by EDID description** (`desc:`), not by `DP-1`/`DP-2`.
+  Port names float here — both externals are DP tunnels over one Thunderbolt connector, so
+  whichever trains first takes the low number. Until 2026-08-03 the name-bound rules had
+  quietly put workspaces 1–3 on the 16" portable and 6–9 on the Xiaomi.
 - Move the cursor straight across the seam to traverse monitors.
 
 The layout above is the static `desktop` profile. As of 2026-06-10 a hotplug daemon
@@ -211,12 +219,23 @@ the layout automatically from what's plugged in:
   road (it prefers `trio` when the demoset FHD portable is connected). The choice holds
   until the next **external** plug/unplug, when the daemon re-asserts the automatic profile.
 - Apply any profile directly: `~/.config/hypr/scripts/monitor-mode.sh {desktop|read|laptop|onescreen|trio}`.
-- The `read`/`trio` profiles pick panels by capability (QHD = whichever external does
-  `2560×1600`), so they also work on the road where DP-1/DP-2 swap with plug order.
+- **All** profiles pick panels by capability (QHD = whichever external does `2560×1600`),
+  so they also work on the road where DP-1/DP-2 swap with plug order. `desktop` and
+  `onescreen` joined `read`/`trio` in this on 2026-08-03 — before that they forced the
+  retired Samsung's `1920×1080` onto whatever landed on `DP-1`.
+- The daemon is **debounced**: it waits for the hotplug burst to go quiet (~2 s) and for the
+  monitor set to hold still before applying anything, so a brief display blink — a dock
+  renegotiation, a resume, a USB device faulting on the shared controller — no longer
+  reshuffles your layout. A real plug/unplug takes ~3 s to take effect.
+- **Switching into or out of `read` blanks the portable (VCHANCE AQ16H) for about a second.**
+  That's deliberate, not a glitch: Hyprland only rebuilds a monitor's tiling geometry when the
+  output is cycled off and on, so rotating without the cycle left windows sized for landscape
+  on the portrait screen — content running off the right edge. Fixed 2026-08-04; profiles that
+  don't change the rotation switch instantly as before.
 - Geometry for all profiles lives in `monitor-mode.sh`; full details in
   `ACTUAL-CONFIGURATION.md` §11 "Monitor profiles & auto-switching".
 
-> If you want bigger UI on the laptop later: bump `eDP-1` scale to `1.333333` and shift positions to `DP-1 @ 1920x0`, `DP-2 @ 3840x0`. See `system-state-findings.md` and `finish-installation-commands.md` for the math.
+> If you want bigger UI on the laptop later: bump `eDP-1` scale to `1.333333` (2560 ÷ 1.333333 = **1920** logical) and shift the two externals right by the same 128 px — Xiaomi `@ 1920x0`, portable QHD `@ 4992x0` (1920 + 3072). Edit both `monitors.conf` and `apply_desktop`'s offsets in `monitor-mode.sh`, which currently assume eDP-1 is 2048 wide. See `system-state-findings.md` and `finish-installation-commands.md` for the math.
 
 ---
 

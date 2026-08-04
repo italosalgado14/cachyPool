@@ -13,6 +13,7 @@ Clipboard manager: cliphist + Walker plugin. Super+V to paste from history.
 Auth prompts: hyprpolkitagent. Lightweight, matches Hyprland aesthetic.
 Audio/brightness OSD: SwayOSD. The little volume/brightness popup when you press laptop hotkeys.
 File manager: Yazi (terminal, Rust, image previews via Kitty graphics, vim-like). For occasional GUI need, keep KDE's Dolphin — it's already installed and excellent.
+Video player: VLC (`sudo pacman -S vlc`). Plays anything you throw at it without codec hunting, handles network/DVD/subtitle formats the lightweight players skip, and its plugin set is already installed on this machine (`vlc-plugins-all`) — only the binary and the Qt GUI are missing. Alternative already present: Haruna (mpv/Qt, `org.kde.haruna.desktop`) if you want a lighter, Wayland-native player. Install steps + the hardware-decode caveat for this machine: `finish-installation-commands.md` §13.
 Editor: Use what you already use. If you're a Neovim person, LazyVim is the current default starter config. If you're VS Code, just keep VS Code — running it on Wayland works fine.
 Theme: Catppuccin Mocha. It is the dev theme of 2025-2026. Subtle, dark, low-contrast, easy on eyes for long sessions. Everything I listed above has a Catppuccin theme officially. Alternative: Tokyo Night (slightly more contrast).
 Font: JetBrains Mono Nerd Font (with ligatures and dev icons). Install: sudo pacman -S ttf-jetbrains-mono-nerd. Alternative: Iosevka Nerd Font if you prefer narrower characters.

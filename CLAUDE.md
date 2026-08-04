@@ -76,15 +76,44 @@ These are easy to break and hard to debug:
 
 ## Monitor layout (left-to-right)
 
+Static 3-across `desktop` profile, in **logical** pixels (re-fitted for the Xiaomi 2026-08-03):
+
 ```
-eDP-1 (laptop, 0–2048px, scale 1.25, 240Hz)
-DP-1  (Samsung¹, 2048–3968px, scale 1.00, 120Hz)   ← primary, workspace 1 lives here
-DP-2  (portable QHD 16", 3968–6016px, scale 1.25, 120Hz)
+eDP-1                    (laptop 16",     0–2048px,    scale 1.25, 240Hz)
+desc:Xiaomi …Mi Monitor  (27" 4K,      2048–5120px,    scale 1.25,  60Hz)  ← primary, workspace 1
+desc:Invalid Vendor …RTK (portable QHD 16", 5120–7168px, scale 1.25, 120Hz)
 ```
 
-¹ Replaced by a **Xiaomi 27" 4K** (`3840×2160@60`) on 2026-07-11. The capability-based `read`/`trio` profiles handle it live (Xiaomi @ 3072×1728, scale 1.25); the static 3-across `desktop` geometry above is **pending re-fit** (the Xiaomi can't do the old `DP-2 2560×1600` slot). Port names float — Xiaomi is currently `DP-2`, portable QHD is `DP-1`. See `ACTUAL-CONFIGURATION.md` §1 / §15.
+The portable is a **VCHANCE AQ16H** (16" 2560×1600@120, native). Its Realtek scaler
+publishes no vendor string, which is why it appears as `Invalid Vendor Codename - RTK
+HDMI 0x01010101` — that junk string is the `desc:` match key, and the serial is a
+placeholder that can't disambiguate.
 
-Workspace-to-monitor mapping in `monitors.conf`: WS 1–3 → DP-1, 4–5 → eDP-1, 6–9 → DP-2.
+**Never bind anything to `DP-1`/`DP-2`.** Both externals are DP tunnels over one Thunderbolt
+connector (Plugable TBT4-UD5), so whichever trains first takes the low number — the Xiaomi is
+*currently* `DP-2` and the portable is `DP-1`, the reverse of what the names suggest. Since
+2026-08-03 `monitors.conf` matches monitors **and workspaces** by EDID `desc:` (a prefix
+match), and every profile in `monitor-mode.sh` resolves panels by capability. The old
+name-bound rules had silently put workspaces 1–3 on the 16" portable.
+
+Workspace-to-monitor mapping in `monitors.conf`: WS 1–3 → Xiaomi (primary), 4–5 → eDP-1,
+6–9 → portable QHD. Check live descriptions before editing:
+`hyprctl monitors -j | jq -r '.[] | "\(.name) = \(.description)"'`.
+
+`monitor-autoswitch.sh` is **debounced** — it coalesces a hotplug burst and requires the
+monitor set to hold still before applying a profile, so a display blink can't reshuffle the
+layout. Don't reintroduce a per-event `sleep`-and-apply loop. See `ACTUAL-CONFIGURATION.md`
+§1 / §11 / §15.
+
+**Never set a monitor `transform` with a bare `hyprctl keyword monitor` on an output that
+is already enabled.** Hyprland rotates the render pass but keeps the old layout box, so the
+tiling engine hands out landscape geometry on a portrait panel (and vice versa) while
+`hyprctl monitors` reports the new transform — it looks correct and isn't. Go through
+`apply_monitor_tf()` in `monitor-mode.sh`, which cycles the output (disable → re-enable, the
+only thing that rebuilds the box) when the transform actually changes. That cycle emits
+external hotplug events, so it is paired with a fingerprint handshake that keeps
+`monitor-autoswitch.sh` from reverting a manual `Super+M` choice — if you touch either
+script, keep both halves in step. Fixed 2026-08-04; see `ACTUAL-CONFIGURATION.md` §11 / §15.
 
 ## Conventions when updating docs
 

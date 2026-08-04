@@ -1459,6 +1459,119 @@ Boot `linux-cachyos-lts 6.18.35` from the Limine menu (verify the entry per §12
 
 ---
 
+## 13. Install VLC (video playback) — ✅ APPLIED 2026-07-31
+
+**Why:** no general-purpose video player was set up for GUI use. What was on the machine was a half-install: `vlc-plugins-all` was *explicitly* installed (2026 install-time), which pulled `libvlc` and every codec plugin — but the `vlc` package itself and its Qt GUI never were, so there was **no `vlc` binary on `$PATH`**. `haruna` (mpv/Qt, KDE) was installed and does work, but it wasn't documented anywhere and wasn't the ask.
+
+**Applied state 2026-07-31:** `vlc 3.0.23_2-9.1` installed (5 packages, as predicted); hardware decode disabled via `~/.config/vlc/vlcrc`; Elephant hot-reloaded so VLC appears in Walker with no restart. Verification evidence in §13e.
+
+### 13a. Install
+
+```bash
+sudo pacman -S vlc
+```
+
+Pulls only **5 packages** — every plugin dependency is already satisfied:
+
+| Package | Why |
+|---|---|
+| `vlc` | The metapackage / `vlc` launcher + `.desktop` entry |
+| `vlc-gui-qt` | The Qt5 interface (the actual window) |
+| `vlc-cli` | `cvlc`/`nvlc` command-line frontends (hard dep of the Qt GUI) |
+| `qt5-svg`, `qt5-x11extras` | Qt5 deps of `vlc-gui-qt` |
+
+`qt5-wayland` is already installed (§6 of `ACTUAL-CONFIGURATION.md`), so no extra Wayland plumbing is needed.
+
+### 13b. Make it appear in Walker
+
+VLC ships `/usr/share/applications/vlc.desktop`. Elephant's `desktopapplications` provider **sometimes** hot-reloads and sometimes serves a stale cache (Obsidian hot-reloaded; Google Chrome did not — see §7 notes in `ACTUAL-CONFIGURATION.md`).
+
+**2026-07-31: it hot-reloaded — no restart was needed.** Verified immediately after install:
+
+```bash
+elephant query 'desktopapplications;vlc;5'
+# → identifier:"vlc.desktop" text:"VLC media player" subtext:"Media player" score:88   ← top hit
+```
+
+If a future install *doesn't* show up, the fallback is still `systemctl --user restart elephant.service`.
+
+Nothing goes in `configs/applications/` — that mirror is only for custom entries like `shortcuts.desktop`.
+
+### 13c. ⚠ Turn hardware decoding OFF (this machine, for now)
+
+This is the one non-obvious step. Per §12, the i915 hang-recovery NULL deref in kernel `7.0.12`/`7.1.x` can wedge the whole session when a client hangs the **iGPU** video engine — which is exactly what Firefox did on 2026-07-02. Firefox is pinned to software decode via its profile `user.js`; VLC needs the equivalent, or it reintroduces the same freeze risk with the same GPU.
+
+VLC defaults to `--avcodec-hw=any`, i.e. it *will* try VA-API (→ iHD → iGPU). Disable it:
+
+**GUI:** Tools → Preferences → **Show settings: All** → Input / Codecs → *Hardware-accelerated decoding* → **Disable** → Save.
+
+**Or write the config directly** — this is what was done on 2026-07-31:
+
+```bash
+mkdir -p ~/.config/vlc
+printf '[avcodec]\navcodec-hw=none\n' >> ~/.config/vlc/vlcrc
+```
+
+VLC does **not** rewrite `vlcrc` on exit — verified by md5 before/after a full headless playback run, file unchanged. It only rewrites when you hit **Save** in the Preferences dialog, and since it reads the value at startup the GUI will show "Disable" and a Save preserves it. A hand-written partial `vlcrc` is therefore safe to leave in place.
+
+**Or per-launch:** `vlc --avcodec-hw=none <file>`
+
+The i9-12900H decodes 4K H.264/HEVC in software without trouble; the cost is CPU and battery, not playability.
+
+> Re-enable (`avcodec-hw=any`, or just delete the `vlcrc` line) at the same time as Firefox's decode prefs — see §12f — once a kernel past `7.0.12-1-cachyos` proves stable.
+
+### 13d. Do not rely on `env.conf` here
+
+`LIBVA_DRIVER_NAME=iHD` lives in `configs/hypr/env.conf`, which only reaches processes **Hyprland** spawns. Walker/Elephant launches apps from the systemd `--user` manager, which never sees those vars (the §12b finding). So a Walker-launched VLC gets no `LIBVA_DRIVER_NAME` at all — which is another reason 13c belongs in `~/.config/vlc/vlcrc`, not in an env var.
+
+### 13e. Verify — results 2026-07-31 ✅
+
+```bash
+which vlc                # → /usr/bin/vlc
+vlc --version            # → VLC 3.0.23 Vetinari (3.0.23-2-0-g79128878dd)
+grep -A1 '^\[avcodec\]' ~/.config/vlc/vlcrc | grep avcodec-hw    # → avcodec-hw=none
+```
+
+**The decode path is the check that matters.** Don't trust the config file alone — prove VLC honours it. Play any file headless with verbose logging and read the module lookup:
+
+```bash
+ffmpeg -y -f lavfi -i testsrc=size=1280x720:rate=30:duration=3 -c:v libx264 -pix_fmt yuv420p /tmp/test.mp4
+vlc -I dummy -vv --play-and-exit --no-audio --vout=dummy /tmp/test.mp4 2>&1 | grep -i 'hw decoder\|trying format'
+```
+
+Expected — and what was observed:
+
+```
+avcodec decoder debug: trying format vaapi
+main generic debug: looking for hw decoder module matching "none": 3 candidates
+main generic debug: no hw decoder modules matched          ← the pin is working
+avcodec decoder debug: trying format vdpau
+main generic debug: no hw decoder modules matched
+main decoder debug: Received first picture                 ← software decode succeeded
+```
+
+VLC still *enumerates* the hardware formats (vaapi, vdpau, cuda, vulkan are all compiled in) and still *tries* them — that's normal. The pin bites one step later, at the hw-decoder **module** lookup, which is what keeps the iGPU video engine untouched.
+
+Kernel log after the run: `journalctl -k -b 0 --since "10 min ago" | grep -ci "GPU HANG\|i915.*error\|NULL pointer"` → **0**.
+
+Then play a real video in the GUI and confirm: window opens, audio routes through PipeWire, subtitles render, `journalctl -kf` stays clean.
+
+### 13f. Revert
+
+```bash
+sudo pacman -Rns vlc vlc-gui-qt vlc-cli
+```
+
+Leave `vlc-plugins-all` — it predates this install and `phonon-qt6-vlc` (KDE's multimedia backend) depends on the libvlc side of it.
+
+### 13g. Docs updated 2026-07-31 ✅
+
+- `ACTUAL-CONFIGURATION.md` — §7 media table (VLC installed; `haruna` documented for the first time), §9 counts (explicit 273 → **274**, total 1427 → **1432**, AUR unchanged at 12), §15 row moved to ✅, §16 repo layout gained `configs/vlc/`.
+- `spected-installation.md` — VLC added to the recommended stack as the video-player entry.
+- `configs/vlc/vlcrc` — the decode pin is now mirrored in the repo. Restore path on a rebuild: `cp configs/vlc/vlcrc ~/.config/vlc/vlcrc`.
+
+---
+
 ## Order of operations summary
 
 | Priority | Section | Reboot needed? |
@@ -1475,6 +1588,7 @@ Boot `linux-cachyos-lts 6.18.35` from the Limine menu (verify the entry per §12
 | Invasive | 10. Switch DM → getty autologin (fixes phantom cursor at root) | YES |
 | ⚠ Recommended | 11. Force `s2idle` (NVIDIA resume black-screen) | Live: No · Persist: YES |
 | 🔥 Do first | 12. Firefox-freeze fix: VA-API → iGPU, hardware decode paused | YES — reboot also clears the wedged i915 |
+| ✅ Done 2026-07-31 | 13. Install VLC (+ disable its hardware decode, per §12) | No |
 
 ---
 
