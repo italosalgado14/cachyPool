@@ -18,10 +18,11 @@ The docs were written at different times and **disagree with each other**. Trust
 
 1. **`ACTUAL-CONFIGURATION.md`** — most recent (snapshot 2026-05-21, §3/§15 updated through 2026-07-02), generated from a live system scan. This is the authoritative snapshot of installed packages, kernel state, NVIDIA stack, monitors, and outstanding issues.
 2. **`shortcuts.md`** — day-to-day usage reference. Combined cheatsheet + full keybinding tables + workflows + Walker/Yazi/Kitty deep-dives + troubleshooting. Pulled from `configs/hypr/keybindings.conf`. **Merged 2026-05-23** from the previous split between `shortcuts.md` (one-page cheatsheet) and `USABILITY.md` (full reference); `USABILITY.md` no longer exists.
-3. **`system-state-findings.md`** — audit comparing the planned setup against reality. Marks what's working vs. broken.
-4. **`finish-installation-commands.md`** — remediation steps for items flagged in the findings.
-5. **`cachyos-hyprland-setup.md`** — original install plan (May 2026). Now partially stale.
-6. **`spected-installation.md`** — pre-install stack rationale.
+3. **`bluetooth.md`** — Bluetooth pairing + audio runbook (Sony WH-1000XM4). Authoritative for the Bluetooth stack; written 2026-08-20 after the `br-connection-key-missing` half-bond failure. Covers the diagnosis, the re-pair procedure (discovery must be live in the same `bluetoothctl` session), and why LDAC is unavailable.
+4. **`system-state-findings.md`** — audit comparing the planned setup against reality. Marks what's working vs. broken.
+5. **`finish-installation-commands.md`** — remediation steps for items flagged in the findings.
+6. **`cachyos-hyprland-setup.md`** — original install plan (May 2026). Now partially stale.
+7. **`spected-installation.md`** — pre-install stack rationale.
 
 **When `cachyos-hyprland-setup.md` conflicts with `ACTUAL-CONFIGURATION.md`, the latter wins.** Common stale claims in the older docs:
 

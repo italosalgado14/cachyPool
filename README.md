@@ -10,6 +10,7 @@ This is **not a software project** — there is no build, test, or lint pipeline
 cachyPool/
 ├── ACTUAL-CONFIGURATION.md        ← authoritative live-system snapshot (start here)
 ├── shortcuts.md                    ← daily keybindings, workflows, troubleshooting
+├── bluetooth.md                   ← Bluetooth pairing + audio runbook (WH-1000XM4)
 ├── system-state-findings.md       ← audit: planned setup vs. reality
 ├── finish-installation-commands.md← step-by-step remediation for flagged issues
 ├── cachyos-hyprland-setup.md      ← original install plan (now partially stale)
@@ -27,10 +28,11 @@ The docs were written at different times and **disagree with each other**. Trust
 
 1. **`ACTUAL-CONFIGURATION.md`** — most recent, generated from a live system scan. The authoritative snapshot of installed packages, kernel state, the NVIDIA stack, monitors, and outstanding issues. **When older docs conflict with this, this wins.**
 2. **`shortcuts.md`** — day-to-day usage reference: cheatsheet, full keybinding tables, workflows, Walker/Yazi/Kitty deep-dives, and troubleshooting.
-3. **`system-state-findings.md`** — audit comparing the planned setup against reality.
-4. **`finish-installation-commands.md`** — remediation steps for items flagged in the findings.
-5. **`cachyos-hyprland-setup.md`** — original install plan; some claims are now stale.
-6. **`spected-installation.md`** — pre-install stack rationale.
+3. **`bluetooth.md`** — Bluetooth pairing + audio runbook (Sony WH-1000XM4): the `br-connection-key-missing` half-bond failure, the re-pair procedure, verification, and why LDAC is unavailable. Verified 2026-08-20.
+4. **`system-state-findings.md`** — audit comparing the planned setup against reality.
+5. **`finish-installation-commands.md`** — remediation steps for items flagged in the findings.
+6. **`cachyos-hyprland-setup.md`** — original install plan; some claims are now stale.
+7. **`spected-installation.md`** — pre-install stack rationale.
 
 ## The system at a glance
 
