@@ -1,0 +1,21 @@
+[Desktop Entry]
+# User-level override of /usr/share/applications/gimp.desktop (2026-08-25).
+# Reason: the packaged file sets Name=GNU Image Manipulation Program, so Walker
+# lists it under "G-N-U..." and typing "gimp" only matched via the subtext
+# (score 109). Same desktop ID => this file SHADOWS the packaged one entirely,
+# it does not merge -- hence the full MimeType line is copied verbatim below.
+# Exec uses the unversioned /usr/bin/gimp so a GIMP 3.x -> 3.y bump can't break it.
+# Mirrored in the repo at configs/applications/gimp.desktop.
+Version=1.0
+Type=Application
+Name=GIMP
+GenericName=Image Editor
+Comment=Raster image editor - crop, layers, alpha, retouch
+Exec=gimp %U
+Icon=gimp
+Terminal=false
+StartupNotify=true
+StartupWMClass=gimp
+Categories=Graphics;2DGraphics;RasterGraphics;GTK;
+Keywords=gimp;image;editor;photo;png;raster;paint;draw;graphic;design;
+MimeType=image/x-xcf;application/pdf;application/postscript;application/x-navi-animation;image/apng;image/avci;image/avif;image/bmp;image/dds;image/g3-fax;image/gif;image/heif;image/hej2k;image/jp2;image/jpeg;image/jxl;image/openraster;image/png;image/qoi;image/svg+xml;image/tiff;image/vnd.microsoft.icon;image/vnd.wap.wbmp;image/webp;image/x-dcm;image/x-dcx;image/x-exr;image/x-fits;image/x-flic;image/x-icns;image/x-ico;image/x-jp2-codestream;image/x-pcx;image/x-pixmap;image/x-portable-anymap;image/x-psd;image/x-psp;image/x-seattle-filmcamera;image/x-sgi;image/x-sun-raster;image/x-tga;image/x-wmf;image/x-xbitmap;image/x-xwindowdump

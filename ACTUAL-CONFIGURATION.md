@@ -194,6 +194,18 @@ nvidia-drm.modeset=1 nvidia_drm.fbdev=1
 
 > Not installed: `neovim`, `ghostty` (Ghostty is in CachyOS repos if you want to swap in for Kitty later).
 
+### Graphics / image editing (added 2026-08-25)
+
+| Package | Version | Notes |
+|---|---|---|
+| `inkscape` | 1.4.4-6.1 | **Vector editor — the tool for designing buttons/icons.** Repo pkg (`extra`), installed 2026-08-25. Draw once, export PNG at any exact size (32/64/128/512px) without resolution loss. Pulled ~21 deps (`lib2geom`, `libcdr`, `libvisio`, `libwpd`/`libwpg`, `scour`, `gsl`, `python-numpy`, `gspell`, `enchant`, `litehtml`). Ships `/usr/share/applications/org.inkscape.Inkscape.desktop` with `Name=Inkscape`, `Exec=inkscape %F`. Auto-appeared in Walker — Elephant **hot-reloaded**, no restart needed (`elephant query 'desktopapplications;inkscape;5'` → score 218, matched on `field:"text"`). |
+| `gimp` | 3.2.4-2.1 | **Raster editor — crop, layers, alpha, retouch on existing PNGs.** Repo pkg (`extra`), installed 2026-08-25. GIMP 3.x line (native Wayland, single-window UI). Pulled ~10 deps (`gegl`, `babl`, `libgexiv2`, `lensfun`, `libmypaint`, `mypaint-brushes`, `suitesparse`, `libspiro`). ⚠ Walker display name is overridden — see below. |
+| `graphicsmagick` | 1.3.48-1.1 | Pulled in as an Inkscape dependency, not chosen directly. Note the pre-existing `imagemagick` + `optipng` remain the CLI path for batch resize/convert/compress. |
+
+> ⚠ **GIMP's Walker entry is overridden** by `~/.local/share/applications/gimp.desktop` (mirrored at `configs/applications/gimp.desktop`). The packaged `/usr/share/applications/gimp.desktop` sets `Name=GNU Image Manipulation Program`, so Walker listed it under "G-N-U…" and typing `gimp` only matched via the *subtext* (`gimp-3.2`, score 109). Because the override reuses the **same desktop ID**, it **shadows the packaged file entirely rather than merging** — so the packaged `MimeType=` line (44 types) is copied verbatim into it, or "Open with → GIMP" would silently break for the exotic formats. `Exec=gimp %U` deliberately uses the unversioned `/usr/bin/gimp` symlink (→ `gimp-3.2`) so a future 3.x bump can't break launching, unlike the packaged `Exec=gimp-3.2 %U`. Verified after writing: `elephant query 'desktopapplications;gimp;5'` → `text:"GIMP"`, `subtext:"Image Editor"`, single result, matched on `field:"text"` (score 114) — Elephant hot-reloaded the user dir, no service restart needed. `desktop-file-validate` clean.
+
+> **Why these two and not Pinta:** Pinta (the usual lightweight Paint.NET-style pick) is AUR-only here as `pinta-git`/`pinta-gtk3-git` — a from-source .NET build, not worth the maintenance. The lighter fallback if GIMP ever feels excessive is `drawing` (4.6 MiB, in `extra`), but it has no layer support.
+
 ## 8. Installed Packages — Boot / Snapshots / Power
 
 | Package | Version | Role |
@@ -455,6 +467,7 @@ cachyPool/
     ├── vlc/                           ← mirrors ~/.config/vlc/
     │   └── vlcrc                      ← hardware decode pinned off (avcodec-hw=none) — see §7 media note
     ├── applications/                  ← mirrors ~/.local/share/applications/
+    │   ├── gimp.desktop               ← override: Name=GIMP (shadows the packaged entry) — §7
     │   └── shortcuts.desktop          ← "Shortcuts" Walker launcher entry
     └── systemd/user/                  ← mirrors ~/.config/systemd/user/
         └── swayosd.service            ← Restart=always OSD server (survives monitor switches)
