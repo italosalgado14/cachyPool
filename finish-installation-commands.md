@@ -1572,6 +1572,172 @@ Leave `vlc-plugins-all` — it predates this install and `phonon-qt6-vlc` (KDE's
 
 ---
 
+## 14. Battery charge cap at 80% (acer-wmi-battery) — ✅ INSTALLED 2026-10-12, cap waits for the replacement battery
+
+**Why:** the original battery failed and was physically removed on 2026-10-12. A replacement is on order and should arrive within a few weeks. The likely cause is months spent docked at 100%, made worse by a gaming laptop's heat. Capping the charge at 80% is the standard mitigation, and it should already be in place when the new pack goes in.
+
+**Why this tool and not TLP / KDE / GNOME:** all of those write the kernel's standard `charge_control_end_threshold` attribute on the battery's `power_supply` node. Nothing on this machine exposes that attribute. The in-kernel `acer_wmi` (7.2.8) has no battery code at all: its module contains no charge, battery or health strings. The firmware *does* expose Acer's battery-health WMI interface, GUID `79772EC5-04B1-4BFD-843C-61E7F77B6CC9`, which is what Acer Care Center / PredatorSense use on Windows. `acer-wmi-battery` is a small out-of-tree driver for exactly that GUID.
+
+**Evidence gathered 2026-10-12, before installing:**
+
+| Check | Result |
+|---|---|
+| Battery present | No. `/sys/class/power_supply/` holds only `ACAD` and two UCSI USB-C sources |
+| Battery-health WMI GUID | Present (`79772EC5-04B1-4BFD-843C-61E7F77B6CC9-4`, no driver bound) |
+| Charge limit in the in-kernel `acer_wmi` | None |
+| Upstream `MODELS.md` | Predator Triton 300 SE and Helios Neo 16 reported working. PT516-52s not listed |
+| Test build vs `7.2.8-1-cachyos` (clang 22, ThinLTO, `LLVM=1`) | ✅ clean |
+| Test build vs `6.18.52-1-cachyos-lts` (GCC) | ✅ clean |
+| `makepkg` of AUR `acer-wmi-battery-dkms 0.2.0-2` | ✅ source sha256 matches the PKGBUILD |
+| Reviewed by hand | PKGBUILD, `dkms.conf`, `.install` (prints a notice, sleeps 5 s), Makefile (plain `obj-m`), C source (three WMI methods: 19 battery info, 20 get status, 21 set) |
+| Secure Boot | Disabled, so the unsigned DKMS module loads without MOK enrolment |
+
+**Rejected alternative:** `linuwu-sense-dkms` / `div-acer-manager-max` (DAMX). It has the same fixed 80% limiter, but it *replaces* the in-kernel `acer_wmi` to add fan, RGB and thermal control, and upstream only claims full support for the PHN16-71. More blast radius for the same cap.
+
+### 14a. Install
+
+Run in a Kitty terminal, since the `sudo` prompts are interactive:
+
+```bash
+paru -S --skipreview acer-wmi-battery-dkms
+sudo install -Dm644 ~/code/cachyPool/configs/modprobe.d/acer-wmi-battery.conf /etc/modprobe.d/acer-wmi-battery.conf
+sudo modprobe acer_wmi_battery
+```
+
+- **`dkms` comes along** as the only new dependency. pacman picks the `cachyos` repo build (`3.4.3-1`), which depends on clang/lld/llvm. Those are already installed, and the main kernel needs them because it is clang-built. The DKMS pacman hook builds the module for **both** installed kernels and rebuilds it on every kernel update.
+- **Autoload:** the package ships `/usr/lib/modules-load.d/acer-wmi-battery.conf`, so the module loads at every boot.
+- **The cap itself** comes from `configs/modprobe.d/acer-wmi-battery.conf`, which sets `enable_health_mode=1`. Every module load re-sends the 80% cap. Without that option the module loads but leaves the firmware setting untouched.
+- **The cap is fixed at 80%** by the firmware. It is not configurable.
+- **paru asks you to pick a provider** because `acer-wmi-battery-dkms-git` also provides the name. Pick `1`, the default: the pinned `0.2.0` release with a checksum, which is the one reviewed above. The `-git` package builds whatever is on the upstream branch that day.
+
+### 14b. Verify
+
+```bash
+dkms status acer_wmi_battery                              # → installed for 7.2.8-1-cachyos and 6.18.52-1-cachyos-lts
+lsmod | grep acer_wmi_battery
+cat /sys/bus/wmi/drivers/acer-wmi-battery/health_mode     # 1 = cap on · 0 = off · -1 = firmware reports it unsupported
+journalctl -k -b | grep acer_wmi_battery                  # "available modes: health mode, calibration mode"
+systemctl is-failed systemd-modules-load.service          # must print "active", not "failed"
+```
+
+⚠ **No battery fitted means no real proof yet.** Until the replacement arrives, the only possible checks are that the module loads and that the firmware reads back `health_mode = 1`. The real test comes once the new pack is in: charging must stop near 80% instead of climbing to 100%.
+
+```bash
+upower -i $(upower -e | grep BAT)
+```
+
+**Results 2026-10-12: installed and loading, cap not active yet.**
+
+| Check | Result |
+|---|---|
+| Install sequence | paru 21:02:50 → 21:03:20 (`dkms` first, then the package), option file copied 21:03:28, `modprobe` 21:03:35. The option was in place before the load |
+| `dkms status` | `installed` for `7.2.8-1-cachyos` and `6.18.52-1-cachyos-lts`. The 7.2.8 `make.log` shows DKMS added `LLVM=1` by itself for the clang-built kernel |
+| `modprobe -c` | `options acer_wmi_battery enable_health_mode=1`, plus the alias `wmi:79772EC5_04B1_4bfd_843C_61E7F77B6CC9`, so udev can also autoload it |
+| `lsmod` | loaded |
+| Kernel log | `available modes: health mode, calibration mode`, and no `active modes` line. Also `module verification failed: signature and/or required key missing - tainting kernel`, which is expected for an unsigned out-of-tree module with Secure Boot off |
+| `health_mode` | **`0`** |
+| `temperature` | `No such device or address`, since there is no pack to read |
+| `systemd-modules-load.service` | `active` |
+
+**Reading the `0`:** the set call succeeded at the ACPI level, because otherwise init returns `-EIO` and the module would not be loaded. Yet the firmware's own status read right after it reports health mode off. The driver ignores the firmware's return code, so a silent refusal looks exactly like this. The likely reason is that there is no pack for the EC to apply the cap to. That is not proven: it could also mean this firmware ignores the command. The successful load without a battery does settle one worry: boot will not fail `systemd-modules-load.service`.
+
+**When the replacement is fitted:** install it with the laptop off and boot normally, so the module re-sends the cap when it loads. Then:
+
+```bash
+cat /sys/bus/wmi/drivers/acer-wmi-battery/health_mode     # want 1
+journalctl -k -b | grep acer_wmi_battery                  # want "active modes: health mode"
+upower -i $(upower -e | grep BAT)                         # charging should stop near 80%
+```
+
+If it still reads `0` with a pack fitted, set it by hand once with `echo 1 | sudo tee /sys/bus/wmi/drivers/acer-wmi-battery/health_mode`. If that also reads back `0`, this firmware does not honour the Care Center interface. The fallback is then `linuwu-sense`, which drives a different interface, the PredatorSense one (see "Rejected alternative" above).
+
+### 14c. Calibration mode: leave it alone
+
+The driver also exposes `/sys/bus/wmi/drivers/acer-wmi-battery/calibration_mode`. Calibration turns health mode off, charges to 100%, drains, and recharges, which takes hours on AC with the laptop idle. It is not part of this setup. If it is ever used, write `0` to it by hand afterwards, because the driver does not handle the firmware's completion event, then write `1` to `health_mode` again.
+
+### 14d. Revert
+
+```bash
+echo 0 | sudo tee /sys/bus/wmi/drivers/acer-wmi-battery/health_mode   # lift the cap in firmware first
+sudo rm /etc/modprobe.d/acer-wmi-battery.conf
+sudo modprobe -r acer_wmi_battery
+paru -Rns acer-wmi-battery-dkms                                        # takes dkms with it if nothing else needs it
+```
+
+### 14e. Docs updated 2026-10-12
+
+- `ACTUAL-CONFIGURATION.md`: §1 battery row, §8 rows for `acer-wmi-battery-dkms` and `dkms`, §9 counts, §15 new row, §16 repo layout gained `configs/modprobe.d/`.
+- `configs/modprobe.d/acer-wmi-battery.conf`: new mirror of `/etc/modprobe.d/acer-wmi-battery.conf`. Restore path on a rebuild is the `sudo install` line in §14a.
+- `CLAUDE.md`: hardware-constraints bullet.
+
+---
+
+## 15. logind: ignore lid close on external power — ✅ APPLIED 2026-10-12 (written 2026-07-12, never installed until then)
+
+**Why:** resuming from s2idle can crash `nvidia_modeset` on this machine, ending in a black screen and a forced power-off (GSP row in `ACTUAL-CONFIGURATION.md` §15). The 2026-07-12 mitigation had two halves: hypridle's 20-min suspend became battery-only, and closing the lid on external power was to be ignored by logind. The first half went live. The second was only committed to the repo as `configs/systemd/logind.conf.d/50-no-suspend-on-external-power.conf`. `/etc/systemd/logind.conf.d/` never existed, and `shortcuts.md` §7 and the GSP row described a setting that was not there.
+
+**State before the fix, 2026-10-12** (`busctl get-property org.freedesktop.login1 /org/freedesktop/login1 org.freedesktop.login1.Manager <prop>`):
+
+| Property | Value | Meaning |
+|---|---|---|
+| `HandleLidSwitch` | `suspend` | the default |
+| `HandleLidSwitchExternalPower` | *(empty)* | unset, so it falls back to `HandleLidSwitch` = suspend |
+| `HandleLidSwitchDocked` | `ignore` | the default |
+| `Docked` | `true` | logind counts the two TB4 monitors as "docked" |
+| `OnExternalPower` | `true` | always, since the battery was removed |
+
+**Why nobody noticed:** at the desk, closing the lid did nothing because logind saw the machine as docked. The exposure was a dock blink with the lid shut. logind keeps re-evaluating the lid action while the lid stays closed, and its docked test reads the DRM connector status. The Plugable TBT4-UD5 has twice dropped both DP tunnels for about 5 s with no host-side trigger, on 2026-10-07 at 22:14:46 and on 2026-10-12 at 20:22:59. Each time it was about a minute after boot, past logind's 30 s holdoff. With the lid closed, that blink reads as undocked on external power, which fell through to suspend: the crash path. No such suspend happened. The journal, retained from 2026-09-30, had no lid events at all before 2026-10-12.
+
+### 15a. Apply
+
+```bash
+sudo install -Dm644 ~/code/cachyPool/configs/systemd/logind.conf.d/50-no-suspend-on-external-power.conf /etc/systemd/logind.conf.d/50-no-suspend-on-external-power.conf
+sudo systemctl kill -s HUP systemd-logind
+```
+
+The HUP makes logind re-read its config in place: no restart, and the session keeps running. Do **not** `systemctl restart systemd-logind` from inside the graphical session.
+
+### 15b. Verify — results 2026-10-12 ✅
+
+```bash
+busctl get-property org.freedesktop.login1 /org/freedesktop/login1 org.freedesktop.login1.Manager HandleLidSwitchExternalPower   # → s "ignore"
+journalctl -u systemd-logind -b | tail -3
+```
+
+| Check | Result |
+|---|---|
+| Applied | `install` at 21:15:02, HUP at 21:15:13. logind logged `Config file reloaded.` |
+| Live file | identical to the repo mirror |
+| `HandleLidSwitchExternalPower` | `ignore` |
+| Real lid close | 21:16:17, dock attached, `read` profile. logind logged `Lid closed.` and nothing else. No suspend in the journal. Both TB4 monitors stayed on with DPMS on, and the session kept running |
+
+**Resulting behaviour:**
+
+| Situation | Lid close does |
+|---|---|
+| Docked, any power | nothing |
+| External power, not docked | nothing (new) |
+| Battery, not docked | suspend, locking first via hypridle's `before_sleep_cmd` |
+
+With the battery removed, the machine is always on external power, so the lid never suspends it until the replacement pack is fitted.
+
+**Not covered by logind:** hypridle still locks after 5 min idle and turns the outputs off after 10 min, lid open or closed. Input from an external keyboard or mouse resets both. For closed-lid use, stay in the `read` profile: in `desktop`, eDP-1 stays enabled behind the lid, holding workspaces 4–5, and the cursor can wander onto it.
+
+### 15c. Revert
+
+```bash
+sudo rm /etc/systemd/logind.conf.d/50-no-suspend-on-external-power.conf
+sudo systemctl kill -s HUP systemd-logind
+```
+
+### 15d. Docs updated 2026-10-12
+
+- `ACTUAL-CONFIGURATION.md`: GSP row annotated, new §15 row, §16 repo layout gained `configs/systemd/logind.conf.d/`.
+- `shortcuts.md` §7: lid-close line corrected. It used to say the lid "locks, then suspends", but nothing locks on lid close unless the machine actually suspends. Closed-lid tips added.
+- `CLAUDE.md`: note that `configs/` also mirrors two system paths whose live copies must be checked.
+
+---
+
 ## Order of operations summary
 
 | Priority | Section | Reboot needed? |
@@ -1589,6 +1755,8 @@ Leave `vlc-plugins-all` — it predates this install and `phonon-qt6-vlc` (KDE's
 | ⚠ Recommended | 11. Force `s2idle` (NVIDIA resume black-screen) | Live: No · Persist: YES |
 | 🔥 Do first | 12. Firefox-freeze fix: VA-API → iGPU, hardware decode paused | YES — reboot also clears the wedged i915 |
 | ✅ Done 2026-07-31 | 13. Install VLC (+ disable its hardware decode, per §12) | No |
+| ✅ Installed 2026-10-12 (cap needs the new battery) | 14. Battery charge cap at 80% (`acer-wmi-battery-dkms`) | No |
+| ✅ Done 2026-10-12 | 15. logind: ignore lid close on external power (written 2026-07-12, installed 2026-10-12) | No |
 
 ---
 

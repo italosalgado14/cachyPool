@@ -316,7 +316,8 @@ The terminal uses JetBrains Mono Nerd Font 12pt + Catppuccin Mocha theme + 95% b
 - **Auto-lock:** 5 minutes of input idle
 - **Screen off:** 10 minutes
 - **Suspend:** 20 minutes, **battery only** (will require password to resume). On AC/USB-C power the machine stays awake — changed 2026-07-12 after a resume-from-suspend NVIDIA crash (see `ACTUAL-CONFIGURATION.md` §15, GSP row).
-- **Lid close:** locks, then suspends **only on battery** (logind: `HandleLidSwitchExternalPower=ignore` since 2026-07-12); docked with external monitors it never suspends.
+- **Lid close:** ignored on external power (AC, USB-C PD, dock) and whenever docked with external monitors. Only on battery **and** undocked does it suspend, locking first. logind: `HandleLidSwitchExternalPower=ignore` in `/etc/systemd/logind.conf.d/50-no-suspend-on-external-power.conf`, written 2026-07-12 but only live since **2026-10-12**. While the battery is out (since 2026-10-12) the machine is always on external power, so the lid never suspends it.
+- **Using it lid-closed on the dock:** works, and the TB4 monitors keep running. Stay in the `read` profile, which already turns the laptop panel off. In `desktop`, eDP-1 stays enabled behind the lid, holding workspaces 4–5, and the cursor can wander onto it. Idle lock (5 min) and screen-off (10 min) still apply with the lid closed; external keyboard or mouse input resets them.
 
 To customize timeouts: edit `~/.config/hypr/hypridle.conf`, then restart the daemon: `pkill hypridle; hyprctl dispatch exec hypridle` (`hyprctl reload` does **not** re-read hypridle.conf).
 
