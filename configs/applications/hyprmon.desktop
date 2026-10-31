@@ -1,0 +1,18 @@
+# Installed to ~/.local/share/applications/hyprmon.desktop
+# Overrides the packaged /usr/share/applications/hyprmon.desktop from AUR
+# hyprmon-bin. Same desktop ID, so it SHADOWS the packaged file instead of
+# merging with it. The packaged Exec (`uwsm app -- hyprmon`, Terminal=true)
+# would start bare hyprmon, whose `S` key appends port-bound monitor= lines to
+# hyprland.conf and runs `hyprctl reload` (and uwsm isn't installed anyway).
+# This one goes through hyprmon-edit.sh, which neuters both. See the header of
+# configs/hypr/scripts/hyprmon-edit.sh.
+[Desktop Entry]
+Type=Application
+Name=Hyprmon
+GenericName=Monitor layout editor
+Comment=Arrange monitors visually and save monitor-mode.sh profiles
+Exec=/home/isalgado/.config/hypr/scripts/hyprmon-edit.sh
+Icon=hyprmon
+Terminal=false
+Categories=Settings;HardwareSettings;
+Keywords=hyprland;monitor;display;profile;arrange;layout;

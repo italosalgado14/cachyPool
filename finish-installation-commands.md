@@ -1738,6 +1738,100 @@ sudo systemctl kill -s HUP systemd-logind
 
 ---
 
+## 16. Visual monitor layouts: Hyprmon as editor, `monitor-mode.sh` as applier — ✅ APPLIED 2026-10-15, `hyprmon-bin` installed + verified 2026-10-16
+
+**Why:** the only way to rearrange screens was editing coordinate arithmetic in `monitor-mode.sh`, and there was no quick way into monitor settings. Omarchy's answer is *Setup > Monitors*, which opens its `monitors.lua` in an editor, plus a pointer to Hyprmon in its manual for drag-to-arrange. Adopting Hyprmon wholesale was rejected after reading hyprmon 0.0.17's source. `applyProfile` and the `S` key set transforms with a bare `hyprctl keyword monitor` (the 2026-08-04 stale-layout-box bug). They rewrite `monitor=` lines in `hyprland.conf`, where ours has none, so hyprmon would *append* port-bound lines after the `source` lines. They leave a never-pruned `.bak.<ts>`, write only the profile's monitors, and end with `hyprctl reload`. Hyprmon also has no hotplug auto-switching, and its profiles only know specific monitors. So it's a hybrid: Hyprmon edits, `monitor-mode.sh` applies.
+
+**What changed** (repo and live, 2026-10-15):
+
+| Piece | What it does |
+|---|---|
+| `monitor-mode.sh` → `apply_from_profile` | `~/.config/hyprmon/profiles/<mode>.json` wins when its monitors, matched by hyprmon's `hardware_id` (EDID `make/model[/serial]`), are **exactly** the connected set; otherwise `apply_<mode>` runs as before. Goes through `apply_monitor_tf`, so the rotation cycle and fingerprint handshake are intact |
+| `configs/hyprmon/profiles/{desktop,read}.json` | Seeded from the existing hand-written geometry with hyprmon's JSON field names (`PxW`, `X`, `Transform`, `hardware_id`, …) |
+| `scripts/hyprmon-edit.sh` | Runs hyprmon in a floating Kitty with `HYPRLAND_CONFIG=~/.local/state/hyprmon/scratch.conf` (nothing sources it) and a `hyprctl` shim first in `$PATH` that blocks `reload`. Re-applies the current mode on quit |
+| `scripts/monitor-menu.sh` | `walker --dmenu` menu: the profiles that fit the connected set (same classification as `desired_mode()`; current marked `●`), *Edit layout (Hyprmon)*, *Show current layout* |
+| `keybindings.conf` | `Super+Shift+M` → `monitor-menu.sh` |
+| `windowrules.conf` | `class hyprmon-edit`: float, 1200×800, centred |
+| `configs/applications/monitors.desktop` | "Monitors" Walker entry → `monitor-menu.sh` |
+| `configs/applications/hyprmon.desktop` | Shadows the packaged entry (`Exec=uwsm app -- hyprmon`, which bypasses the wrapper) → `hyprmon-edit.sh` |
+| `show-shortcuts.sh` | `Super+Shift+M` added; the stale Samsung "desktop" block replaced with the current Xiaomi geometry |
+
+### 16a. Install Hyprmon (needs your sudo password) — ✅ done 2026-10-15 23:54
+
+```bash
+paru -S hyprmon-bin        # NOT 'hyprmon': on the AUR that name is an unrelated Rust project
+```
+
+PKGBUILD reviewed 2026-10-15: it downloads `hyprmon-linux-amd64.tar.gz` from the upstream v0.0.17 GitHub release with a pinned sha256, and installs `/usr/bin/hyprmon`, `/usr/share/applications/hyprmon.desktop` and an icon. Nothing runs at install time.
+
+### 16b. Deploy (done 2026-10-15)
+
+```bash
+cd ~/code/cachyPool
+cp configs/hypr/scripts/{monitor-mode,hyprmon-edit,monitor-menu,show-shortcuts}.sh ~/.config/hypr/scripts/
+chmod +x ~/.config/hypr/scripts/{monitor-mode,hyprmon-edit,monitor-menu}.sh
+install -Dm600 configs/hyprmon/profiles/read.json    ~/.config/hyprmon/profiles/read.json
+install -Dm600 configs/hyprmon/profiles/desktop.json ~/.config/hyprmon/profiles/desktop.json
+install -Dm644 configs/applications/monitors.desktop ~/.local/share/applications/monitors.desktop
+install -Dm644 configs/applications/hyprmon.desktop  ~/.local/share/applications/hyprmon.desktop
+cp configs/hypr/{windowrules,keybindings}.conf ~/.config/hypr/
+hyprctl reload                                   # auto-reload missed the second file once
+~/.config/hypr/scripts/monitor-mode.sh "$(cat $XDG_RUNTIME_DIR/hypr-monitor-mode)"   # reload reset the screens
+```
+
+⚠ Copying any sourced `.conf` triggers Hyprland's auto-reload, which **snaps the screens to the `monitors.conf` boot geometry** while `$STATE` still names the old profile. Always re-apply the profile afterwards.
+
+### 16c. Verify — results 2026-10-15
+
+| Check | Result |
+|---|---|
+| Dry run, stub `hyprctl` | `read`/`desktop` JSON emit the same specs as the hand-written code, with `transform,N` explicit. `trio`/`onescreen`/`laptop` have no JSON and use the code path. A JSON with a wrong serial, invalid JSON, or a missing monitor each fall back to the code path |
+| `read` live | Xiaomi `0,0`, AQ16H `3072,0 t3`, eDP-1 off, `$FPFILE` fresh (it cycled). Test window on WS 7: `1260×1992` |
+| `desktop` live | eDP-1 `0`, Xiaomi `2048`, AQ16H `5120`, all `t0`. Test window: `2028×1224`. Still `desktop` after 15 s, so the daemon held it |
+| Back to `read` | Same as the first `read` row, user workspaces back in place, `swayosd` active |
+| Keybind | `hyprctl binds` lists `mods=65 key=M → monitor-menu.sh` |
+| Walker | `elephant query 'desktopapplications;monitors;5'` → "Monitors" (score 218); `…;hyprmon;5` → the override (subtext "Monitor layout editor") |
+| systemd env | `HYPRLAND_INSTANCE_SIGNATURE` present, so the menu's `hyprctl` calls work when launched from Walker |
+
+**After 16a — results 2026-10-16:**
+
+| Check | Result |
+|---|---|
+| Package | `hyprmon-bin 0.0.17-1`, explicit, installed 2026-10-15 23:54. `hyprmon --version` → `v0.0.17 (commit: 3131caf)`. No new dependencies |
+| Hyprmon reads the seeded JSON | `hyprmon --list-profiles` → `desktop`, `read *`; `--active-profile` → `read`. Its own `compareMonitorConfigurations` matched the live set, so the seed format is correct |
+| Scripted editor session | The wrapper was driven through a pty: `P` → type `zzprobe` → Enter, then `S`, then `Q`. The script answers termenv's OSC 10/11 colour queries; unanswered, they swallowed the keystrokes |
+| `P` | Wrote `zzprobe.json`, identical to `read.json` on every field `apply_from_profile` uses (`hardware_id`, `PxW`/`PxH`, `Scale`, `X`/`Y`, `Active`, `Transform`). Only the Hz decimals differ (`60` vs `60.00000`). The key sets are identical too. A dry run fed that file emitted exactly the seed's specs. Probe profile deleted afterwards |
+| `S` | Wrote `monitor=eDP-1,disable` / `monitor=DP-1,…,0x0,1.25` / `monitor=DP-2,…,3072x0,1.25,transform,3` into `~/.local/state/hyprmon/scratch.conf`: port-bound lines, which is exactly what it would have appended to `hyprland.conf`. Geometry was **unchanged** while hyprmon was still open, so the shim blocked the `hyprctl reload` |
+| Quit | Wrapper exit 0. `monitor-mode.sh read` re-ran (swayosd restarted), `scratch.conf.bak.*` removed, geometry unchanged |
+| Killed instead of quit | `SIGTERM` to hyprmon → the `EXIT` trap still re-applied the profile. Bash defers the wrapper's own `TERM`/`HUP` trap until hyprmon exits, so a closed Kitty window is covered once hyprmon dies |
+| Coordinates | hyprmon reads `X`/`Y` from `hyprctl monitors` and moves them in pixel steps of the same space. Its saved values equal the live logical positions, which are what `apply_from_profile` passes through. A real drag-and-save hasn't been done yet; the first one you make will show it |
+| Keys in 0.0.17 | `G` grid, `L` (uppercase; lowercase `l` moves right) snapping, `R` scale picker, `C`/`D` advanced settings incl. rotation, `A` apply, `P` save profile, `S` save config, `O` hyprmon's profile menu (avoid), `Z` revert, `Q` quit. The profile-name box takes **one key per keystroke**, so typing works and pasting doesn't |
+| Menu | The editor was first opened at 2026-10-15 23:55, when `~/.local/state/hyprmon/` was created. The Walker `--dmenu` path itself wasn't scripted; its parsing and filtering were tested with a stub `walker` |
+
+### 16d. Usage rules
+
+- Save layouts with **`P`** under the profile's name. **Never `S`**; it's harmless here, but it isn't the save key. Never `hyprmon --profile` either.
+- Don't switch an **external** off inside Hyprmon: the auto-switcher treats it as an unplug.
+- A profile applies only when exactly its monitors are connected. Anything else falls back to the hand-written layout.
+- After editing a profile, pull it into the repo: `cp ~/.config/hyprmon/profiles/<mode>.json configs/hyprmon/profiles/`.
+
+### 16e. Revert
+
+```bash
+rm ~/.config/hyprmon/profiles/*.json      # monitor-mode.sh falls straight back to the hand-written geometry
+paru -Rns hyprmon-bin
+rm ~/.local/share/applications/{hyprmon,monitors}.desktop
+# then drop the Super+Shift+M bind and the hyprmon-edit windowrules, and re-copy the .conf files
+```
+
+### 16f. Docs updated 2026-10-15
+
+- `ACTUAL-CONFIGURATION.md`: header, §5 `hyprmon-bin` row, §11 file list and profile bullets, §15 new row, §16 repo layout.
+- `shortcuts.md`: Quick reference and §1.1 `Super+Shift+M`, §3 editing workflow, §11 `monitors.conf` row.
+- `CLAUDE.md`: monitor section notes the profile JSONs and the "never `S` / `--profile`" rule.
+
+---
+
 ## Order of operations summary
 
 | Priority | Section | Reboot needed? |
@@ -1757,6 +1851,7 @@ sudo systemctl kill -s HUP systemd-logind
 | ✅ Done 2026-07-31 | 13. Install VLC (+ disable its hardware decode, per §12) | No |
 | ✅ Installed 2026-10-12 (cap needs the new battery) | 14. Battery charge cap at 80% (`acer-wmi-battery-dkms`) | No |
 | ✅ Done 2026-10-12 | 15. logind: ignore lid close on external power (written 2026-07-12, installed 2026-10-12) | No |
+| ✅ Done 2026-10-16 | 16. Visual monitor layouts: Hyprmon editor + Monitors menu | No |
 
 ---
 

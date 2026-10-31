@@ -76,15 +76,16 @@ cat <<EOF
     Brightness Up/Down       Backlight
     Play / Next / Prev       Media (playerctl-aware apps)
 
-  ${c}MONITORS${r}   ${d}(geometry lives in monitor-mode.sh)${r}
+  ${c}MONITORS${r}   ${d}(geometry: hyprmon profile if saved, else monitor-mode.sh)${r}
     Super + M                Toggle: read ↔ desktop (desk) · read ↔ trio (road)
-    ${d}Desk primary: Xiaomi 27" 4K 3840x2160@60 → read runs it at 3072x1728${r}
+    Super + Shift + M        Monitors menu: fitting profiles · Hyprmon editor · live layout
+    ${d}Desk primary: Xiaomi 27" 4K 3840x2160@60 → runs at 3072x1728${r}
     ${d}  (scale 1.25). Replaced the Samsung FHD 24" on 2026-07-11.${r}
 
-    ${d}Desktop profile — monitors.conf (⚠ still lists old Samsung, pending):${r}
-      eDP-1   2560x1600@240   scale 1.25   x:0      ${d}laptop · ws 4-5${r}
-      DP-1    1920x1080@120   scale 1.00   x:2048   ${d}(Samsung→Xiaomi) · ws 1-3${r}
-      DP-2    2560x1600@120   scale 1.25   x:3968   ${d}portable QHD · ws 6-9${r}
+    ${d}Desktop profile (logical px · matched by EDID, never by DP-1/DP-2):${r}
+      eDP-1    2560x1600@240   scale 1.25   x:0      ${d}laptop · ws 4-5${r}
+      Xiaomi   3840x2160@60    scale 1.25   x:2048   ${d}desk primary · ws 1-3${r}
+      AQ16H    2560x1600@120   scale 1.25   x:5120   ${d}portable QHD · ws 6-9${r}
 
     ${d}Profiles — monitor-mode.sh {desktop|read|laptop|onescreen|trio}:${r}
       desktop     3-across, all landscape        ${d}(manual · Super+M only)${r}
@@ -92,6 +93,8 @@ cat <<EOF
       trio        FHD · laptop · QHD  (both 16" portables, on the road)
       onescreen   one external · laptop, side by side
       laptop      integrated screen only
+    ${d}Edit a layout: menu → Hyprmon → drag, A to preview, P to save as the${r}
+    ${d}  profile's name (never S). Saved: ~/.config/hyprmon/profiles/${r}
 
     ${d}Auto-switch on plug/unplug (never picks desktop):${r}
       ${d}2 externals + demoset FHD → trio · 2 externals → read${r}

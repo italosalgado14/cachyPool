@@ -1,0 +1,14 @@
+# Installed to ~/.local/share/applications/monitors.desktop
+# Adds a "Monitors" entry to the Walker launcher (Elephant desktopapplications
+# provider). Selecting it opens the monitor menu from
+# ~/.config/hypr/scripts/monitor-menu.sh (profiles, Hyprmon editor, live layout).
+[Desktop Entry]
+Type=Application
+Name=Monitors
+GenericName=Monitor layout
+Comment=Pick a monitor profile, edit layouts in Hyprmon, show the live layout
+Exec=/home/isalgado/.config/hypr/scripts/monitor-menu.sh
+Icon=video-display
+Terminal=false
+Categories=Settings;HardwareSettings;
+Keywords=monitors;displays;screens;layout;arrange;profile;resolution;hyprmon;setup;

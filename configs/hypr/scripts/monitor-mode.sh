@@ -15,6 +15,12 @@
 # reload` or relog returns to whatever monitors.conf says. To make a profile
 # the boot default, point the `source = .../monitors.conf` line (or copy the
 # profile over monitors.conf).
+#
+# Geometry source: if ~/.config/hyprmon/profiles/<mode>.json exists and covers
+# exactly the connected monitors, its positions/scales/rotations are applied
+# (edit them visually with hyprmon-edit.sh, save with `P` under the mode's
+# name). Otherwise the hand-written apply_<mode> below runs. See
+# apply_from_profile.
 
 set -euo pipefail
 
@@ -121,6 +127,75 @@ resolve_externals() {
     fi
     EXT_OTHER_W="$(awk -v w="$_w" -v s="$EXT_OTHER_SCALE" 'BEGIN{printf "%d", int(w/s + 0.5)}')"
   fi
+}
+
+# Hyprmon-edited geometry (2026-10-15). A hyprmon profile named after the mode
+# (~/.config/hyprmon/profiles/<mode>.json, saved from the TUI with `P`) replaces
+# the hand-written layout of that mode: hyprmon is the visual EDITOR, this
+# script stays the APPLIER. Never use `hyprmon --profile` or its `S` key — both
+# set the transform with a bare keyword (the stale-layout-box bug above),
+# rewrite a Hyprland config file and `hyprctl reload` on every switch. Launch
+# hyprmon through hyprmon-edit.sh, which neuters the reload.
+#
+# The JSON is used only when its monitor set is EXACTLY the connected set,
+# matched by hyprmon's own hardware_id (make/model/serial from the EDID, built
+# like buildHardwareID in hyprmon's hardware_id.go), so DP-1/DP-2 order never
+# matters. Anything else — an unknown hotel monitor, the demoset portable with
+# no saved trio — returns 1 and the capability-resolved apply_<mode> runs
+# instead. A profile can only ever refine a known desk, never break a new one.
+#
+# Every active output goes through apply_monitor_tf with its transform spelled
+# out (0 included), so the disable -> re-enable cycle and the $FPFILE handshake
+# keep working. Inactive outputs are disabled last, so the session never drops
+# to zero monitors. vrr/bitdepth/cm from the JSON are ignored on purpose: the
+# hand-written profiles never set them either.
+PROFILE_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/hyprmon/profiles"
+
+apply_from_profile() {
+  local mode="$1" file mons plan name active spec tf
+  file="$PROFILE_DIR/$mode.json"
+  [[ -f "$file" ]] || return 1
+  mons="$(hyprctl monitors all -j 2>/dev/null)" || return 1
+
+  # One TSV line per profile monitor — connector, active, spec, transform —
+  # active ones first. Empty output = the profile doesn't fit what's connected.
+  # Hz is rounded to 2 decimals in jq rather than with printf, which would follow
+  # the locale's decimal separator.
+  plan="$(jq -r --slurpfile p "$file" '
+      def hwid: [(.make // ""), (.model // ""), (.serial // "")]
+                | map(tostring | gsub("^\\s+|\\s+$"; ""))
+                | if .[0] == "" and .[1] == "" then ""
+                  elif .[2] == "" then "\(.[0])/\(.[1])"
+                  else join("/") end;
+      ($p[0].monitors // []) as $prof
+      | (map({key: hwid, value: .name}) | from_entries) as $conn
+      | ([.[] | hwid] | sort) as $have
+      | ([$prof[] | .hardware_id // ""] | sort) as $want
+      | if $have != $want or any($want[]; . == "")
+           or ([$prof[] | select(.Active)] | length) == 0
+        then empty
+        else ($prof | sort_by(if .Active then 0 else 1 end))[]
+             | $conn[.hardware_id] as $n
+             | [$n, (.Active | tostring),
+                "\($n),\(.PxW)x\(.PxH)@\((.Hz * 100 | round) / 100),\(.X)x\(.Y),\(.Scale)",
+                (.Transform // 0 | tostring)]
+             | @tsv
+        end' <<<"$mons" 2>/dev/null)" || plan=""
+  [[ -n "$plan" ]] || return 1
+
+  while IFS=$'\t' read -r name active spec tf; do
+    if [[ "$active" == true ]]; then
+      apply_monitor_tf "$name" "$spec,transform,$tf" "$tf"
+    else
+      hyprctl keyword monitor "$name,disable" >/dev/null
+    fi
+  done <<<"$plan"
+
+  echo "$mode" > "$STATE"
+  notify-send -t 2000 "Monitors" "${mode^} layout (hyprmon profile)" 2>/dev/null || true
+  # Always 0 once applying started: a non-zero return here would make the
+  # caller's `|| apply_<mode>` lay the hand-written geometry on top.
+  return 0
 }
 
 apply_desktop() {
@@ -283,12 +358,10 @@ if [[ "$mode" == "toggle" ]]; then
   fi
 fi
 
+# A matching hyprmon profile wins; otherwise the hand-written apply_<mode>.
 case "$mode" in
-  desktop)   apply_desktop ;;
-  read)      apply_read ;;
-  laptop)    apply_laptop ;;
-  onescreen) apply_onescreen ;;
-  trio)      apply_trio ;;
+  desktop|read|laptop|onescreen|trio)
+    apply_from_profile "$mode" || "apply_$mode" ;;
   *) echo "usage: $0 {desktop|read|laptop|onescreen|trio|toggle}" >&2; exit 1 ;;
 esac
 

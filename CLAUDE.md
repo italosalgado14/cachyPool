@@ -119,6 +119,18 @@ external hotplug events, so it is paired with a fingerprint handshake that keeps
 `monitor-autoswitch.sh` from reverting a manual `Super+M` choice — if you touch either
 script, keep both halves in step. Fixed 2026-08-04; see `ACTUAL-CONFIGURATION.md` §11 / §15.
 
+**Profile geometry can come from Hyprmon (since 2026-10-15).** `apply_from_profile` in
+`monitor-mode.sh` applies `~/.config/hyprmon/profiles/<mode>.json` (mirrored in
+`configs/hyprmon/profiles/`) when its monitors, matched by EDID `hardware_id`, are exactly
+the connected set. Otherwise the hand-written `apply_<mode>` runs. Hyprmon (AUR
+`hyprmon-bin`; plain `hyprmon` is an unrelated project) is only the **editor**: launch it
+through `scripts/hyprmon-edit.sh` and save with `P`. Never use `hyprmon --profile` or its
+`S` key: they set transforms with a bare keyword, rewrite `hyprland.conf` and
+`hyprctl reload`. Also: any write to a sourced Hyprland `.conf` auto-reloads Hyprland, which
+snaps the screens to `monitors.conf`'s boot geometry, so re-apply the current profile after
+pushing configs. `Super+Shift+M` opens the Monitors menu (`scripts/monitor-menu.sh`).
+See `finish-installation-commands.md` §16.
+
 ## Conventions when updating docs
 
 - Dates in this repo are in the **2026** timeline (per `ACTUAL-CONFIGURATION.md` snapshot date 2026-05-21). Don't "correct" them to a past year.

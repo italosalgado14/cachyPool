@@ -1,7 +1,7 @@
 # Actual System Configuration
 
 **Snapshot date:** 2026-05-21
-**Last updated:** 2026-10-12 (Battery failed and was removed, replacement on order. 80% charge cap installed for the new pack via AUR `acer-wmi-battery-dkms` + `/etc/modprobe.d/acer-wmi-battery.conf`. The module loads, but the firmware reports the cap as off until a pack is fitted: §1 battery row, §8 package rows, §9 counts, §15 new row, §16 `configs/modprobe.d/`. Details: `finish-installation-commands.md` §14. Same day: the logind lid drop-in from 2026-07-12 turned out never to have been installed; installed and verified with a real lid close, new §15 row, GSP row annotated, §16 gains `configs/systemd/logind.conf.d/`, `finish-installation-commands.md` §15). 2026-07-02 (Firefox-freeze root-cause + VA-API reroute: §3 refreshed — driver now `610.43.02`/`7.0.12-1`, KMS via driver-default + chwd early-KMS, dGPU confirmed **offload-only** with the compositor on the iGPU; `env.conf` `LIBVA_DRIVER_NAME` nvidia→iHD and `NVD_BACKEND` dropped; Firefox hardware decode paused via profile `user.js`; four new §15 rows — freeze incident, i915 `__gen8_ppgtt_clear` NULL-deref bug, NVIDIA GSP resume failure, iGPU-primary discovery. Details: `finish-installation-commands.md` §12). 2026-05-26 (Two fixes: (1) Elephant/Walker — `graphical-session.target` never activates under this getty+`start-hyprland` session, so `elephant.service` never auto-started and Walker hung on "Waiting for elephant"; fixed by adding `exec-once = systemctl --user start elephant.service` to autostart.conf, §10 + §15 reflect it, see `finish-installation-commands.md` §7e.ii–iii. (2) VS Code OS-keyring notification silenced via `~/.config/code-flags.conf` → `--password-store=basic`; §7 editor row + §15 reflect it, see `finish-installation-commands.md` §7f). 2026-05-23 (Walker Elephant backend installed — hub + 9 providers from AUR at `2.21.0-1`, `~/.config/systemd/user/elephant.service` user unit written + enabled; §5/§10/§12/§15 reflect new state. Earlier same-day: verified live state matches mirrored configs; phantom DP-0 EDID warning logged; display-manager row rewritten — system now boots via `getty@tty1` autologin + fish `exec start-hyprland`, plasmalogin disabled per `finish-installation-commands.md` §10)
+**Last updated:** 2026-10-15/16 (Monitor layouts become visually editable. `hyprmon-bin 0.0.17-1` installed 2026-10-15 23:54 and verified on 2026-10-16 with a scripted `P`/`S`/`Q` session; a real drag-and-save is still to be done by hand. AUR `hyprmon-bin` is the editor, `monitor-mode.sh` stays the applier: it now reads `~/.config/hyprmon/profiles/<mode>.json` when that profile covers exactly the connected monitors, else falls back to the hand-written geometry. `desktop` and `read` profiles seeded from the existing geometry. New `hyprmon-edit.sh` wrapper neuters hyprmon's config write + `hyprctl reload`. New `Super+Shift+M` / Walker "Monitors" menu after Omarchy's *Setup > Monitors*. §5 row, §9 counts, §11, §15 new row, §16. Details: `finish-installation-commands.md` §16). 2026-10-12 (Battery failed and was removed, replacement on order. 80% charge cap installed for the new pack via AUR `acer-wmi-battery-dkms` + `/etc/modprobe.d/acer-wmi-battery.conf`. The module loads, but the firmware reports the cap as off until a pack is fitted: §1 battery row, §8 package rows, §9 counts, §15 new row, §16 `configs/modprobe.d/`. Details: `finish-installation-commands.md` §14. Same day: the logind lid drop-in from 2026-07-12 turned out never to have been installed; installed and verified with a real lid close, new §15 row, GSP row annotated, §16 gains `configs/systemd/logind.conf.d/`, `finish-installation-commands.md` §15). 2026-07-02 (Firefox-freeze root-cause + VA-API reroute: §3 refreshed — driver now `610.43.02`/`7.0.12-1`, KMS via driver-default + chwd early-KMS, dGPU confirmed **offload-only** with the compositor on the iGPU; `env.conf` `LIBVA_DRIVER_NAME` nvidia→iHD and `NVD_BACKEND` dropped; Firefox hardware decode paused via profile `user.js`; four new §15 rows — freeze incident, i915 `__gen8_ppgtt_clear` NULL-deref bug, NVIDIA GSP resume failure, iGPU-primary discovery. Details: `finish-installation-commands.md` §12). 2026-05-26 (Two fixes: (1) Elephant/Walker — `graphical-session.target` never activates under this getty+`start-hyprland` session, so `elephant.service` never auto-started and Walker hung on "Waiting for elephant"; fixed by adding `exec-once = systemctl --user start elephant.service` to autostart.conf, §10 + §15 reflect it, see `finish-installation-commands.md` §7e.ii–iii. (2) VS Code OS-keyring notification silenced via `~/.config/code-flags.conf` → `--password-store=basic`; §7 editor row + §15 reflect it, see `finish-installation-commands.md` §7f). 2026-05-23 (Walker Elephant backend installed — hub + 9 providers from AUR at `2.21.0-1`, `~/.config/systemd/user/elephant.service` user unit written + enabled; §5/§10/§12/§15 reflect new state. Earlier same-day: verified live state matches mirrored configs; phantom DP-0 EDID warning logged; display-manager row rewritten — system now boots via `getty@tty1` autologin + fish `exec start-hyprland`, plasmalogin disabled per `finish-installation-commands.md` §10)
 **Hostname:** triton500se
 **User:** isalgado
 
@@ -145,6 +145,7 @@ nvidia-drm.modeset=1 nvidia_drm.fbdev=1
 | `libqalculate` | 5.10.0-1.1 | Calculator backend used by `elephant-calc` |
 | `yazi` | 26.5.6-2.1 | TUI file manager |
 | `swayosd` | 0.3.1-1.1 | Volume/brightness on-screen popups |
+| `hyprmon-bin` *(AUR)* | 0.0.17-1 (installed 2026-10-15) | TUI monitor-layout editor ([erans/hyprmon](https://github.com/erans/hyprmon), the one Omarchy's manual recommends). Used **only** as the visual editor for `monitor-mode.sh` profiles, always through `scripts/hyprmon-edit.sh`. Never `hyprmon --profile` or its `S` key (§11). ⚠ AUR `hyprmon` without `-bin` is an unrelated Rust project with the same name. PKGBUILD reviewed: installs the upstream release binary (pinned sha256), a `.desktop` and an icon. The packaged `.desktop` is shadowed by `~/.local/share/applications/hyprmon.desktop` |
 | `grim` | 1.5.0-2.1 | Wayland screenshot tool |
 | `slurp` | 1.5.0-2.1 | Region selection |
 | `satty` | 0.20.1-2.2 | Screenshot annotation |
@@ -225,9 +226,9 @@ nvidia-drm.modeset=1 nvidia_drm.fbdev=1
 
 ## 9. Installed Packages — Counts
 
-- **Explicitly installed (user-requested):** 279 (2026-10-12 recount; was 274. +`acer-wmi-battery-dkms` on 2026-10-12, +`blender` 2026-09-26, +`git-filter-repo` 2026-08-26, +`inkscape` and `gimp` 2026-08-25, per `/var/log/pacman.log`. Earlier history: was 273; +`vlc` on 2026-07-31 — the other 4 packages it pulled are dependencies, not explicit. +`calibre` on 2026-07-23; +`google-chrome` earlier the same day; was 271 before that. Was 267 on 2026-05-23; +Obsidian on 2026-07-08, plus a few other installs in between)
-- **Total installed (with dependencies):** 1532 (2026-10-12 recount; was 1432. +2 from the battery cap, `acer-wmi-battery-dkms` + `dkms`; the rest are dependencies of the 2026-08-25 → 2026-09-26 installs above. Earlier history: was 1427; +5 from `vlc` on 2026-07-31 — small because `vlc-plugins-all` had already pulled the whole codec stack. Was 1358 before `calibre`'s +69 Python/Qt stack on 2026-07-23)
-- **Foreign / AUR packages:** 14 (`pacman -Qm`, 2026-10-12 recount; was 12). +`acer-wmi-battery-dkms` (AUR, 2026-10-12). +`litehtml0.9 0.9-2.1`, which is not an AUR package: it was installed 2026-06-16 as a dependency, nothing requires it any more, and it has since left the sync repos, so it is an orphan and a removal candidate. Earlier history: unchanged by the VLC install (repo package). Includes `elephant` + 9 providers (all `2.21.0-1`), `visual-studio-code-bin`, and `google-chrome` (added 2026-07-23). `calibre` is **not** here — it's a repo package. Obsidian is **not** here either — repo package from `extra`.
+- **Explicitly installed (user-requested):** 280 (2026-10-16 recount; was 279. +`hyprmon-bin` on 2026-10-15. Earlier history: 279 at the 2026-10-12 recount; was 274. +`acer-wmi-battery-dkms` on 2026-10-12, +`blender` 2026-09-26, +`git-filter-repo` 2026-08-26, +`inkscape` and `gimp` 2026-08-25, per `/var/log/pacman.log`. Earlier history: was 273; +`vlc` on 2026-07-31 — the other 4 packages it pulled are dependencies, not explicit. +`calibre` on 2026-07-23; +`google-chrome` earlier the same day; was 271 before that. Was 267 on 2026-05-23; +Obsidian on 2026-07-08, plus a few other installs in between)
+- **Total installed (with dependencies):** 1533 (2026-10-16 recount; was 1532. +`hyprmon-bin`, no new dependencies, since `hyprland` was already there. Earlier history: 1532 at the 2026-10-12 recount; was 1432. +2 from the battery cap, `acer-wmi-battery-dkms` + `dkms`; the rest are dependencies of the 2026-08-25 → 2026-09-26 installs above. Earlier history: was 1427; +5 from `vlc` on 2026-07-31 — small because `vlc-plugins-all` had already pulled the whole codec stack. Was 1358 before `calibre`'s +69 Python/Qt stack on 2026-07-23)
+- **Foreign / AUR packages:** 15 (`pacman -Qm`, 2026-10-16 recount; was 14). +`hyprmon-bin` (AUR, 2026-10-15). Earlier history: 14 at the 2026-10-12 recount; was 12. +`acer-wmi-battery-dkms` (AUR, 2026-10-12). +`litehtml0.9 0.9-2.1`, which is not an AUR package: it was installed 2026-06-16 as a dependency, nothing requires it any more, and it has since left the sync repos, so it is an orphan and a removal candidate. Earlier history: unchanged by the VLC install (repo package). Includes `elephant` + 9 providers (all `2.21.0-1`), `visual-studio-code-bin`, and `google-chrome` (added 2026-07-23). `calibre` is **not** here — it's a repo package. Obsidian is **not** here either — repo package from `extra`.
 
 Get the full explicit list with `pacman -Qe`. Get only foreign packages (AUR/manual) with `pacman -Qm`.
 
@@ -279,8 +280,12 @@ monitors-read.conf ← alternate "read" profile (portrait external, laptop OFF);
 monitors-trio.conf ← alternate "trio" profile (both 16" portables + laptop centered); NOT sourced, reference only — monitor-mode.sh resolves the geometry by capability (added 2026-07-08)
 scripts/monitor-mode.sh        ← apply a named layout: desktop|read|laptop|onescreen|trio|toggle
 scripts/monitor-autoswitch.sh  ← daemon: auto-picks layout from connected displays (autostart.conf)
+scripts/monitor-menu.sh        ← Walker dmenu "Setup > Monitors": fitting profiles · Hyprmon editor · live layout (Super+Shift+M and the "Monitors" Walker entry; added 2026-10-15)
+scripts/hyprmon-edit.sh        ← launches hyprmon as the profile editor with its config write + reload neutered (added 2026-10-15)
 scripts/show-shortcuts.sh      ← curated keybinding cheatsheet in a floating Kitty window (Super+/ and the "Shortcuts" Walker entry; added 2026-06-17)
 ```
+
+Outside `~/.config/hypr/`: `~/.config/hyprmon/profiles/{desktop,read}.json` (mirrored in `configs/hyprmon/profiles/`) hold the Hyprmon-edited geometry for those two profiles.
 
 ### Monitor profiles & auto-switching (added 2026-06-10)
 
@@ -354,6 +359,60 @@ Externals are counted as "any monitor that isn't `eDP-1`"; the demoset portable 
   blink writes no fingerprint at all, so it still gets the forced re-apply it needs.
 - `monitors.conf` binds monitors **and workspaces** by EDID `desc:` prefix rather than
   `DP-*` (2026-08-03) — see §1.
+- **Hyprmon-edited profiles (added 2026-10-15).** Hyprmon is the visual **editor**,
+  `monitor-mode.sh` stays the **applier**. Arrange the screens in Hyprmon, then save with `P`
+  under a mode's name. The profile lands in `~/.config/hyprmon/profiles/<mode>.json`, and
+  `P` writes only that JSON: no config write, no reload (checked in hyprmon 0.0.17's
+  `saveProfile`). `apply_from_profile` in `monitor-mode.sh` uses it **only when the
+  profile's monitor set equals the connected set**. Monitors are matched by hyprmon's own
+  `hardware_id`, built from the EDID as `make/model/serial`, or `make/model` when the serial
+  is empty. Here those are `BOE/0x0AB5`, `Xiaomi Corporation/Mi Monitor/6638000034671` and
+  `Invalid Vendor Codename - RTK/HDMI/0x01010101`. Port names never enter into it. Any
+  mismatch, unreadable JSON or missing file returns 1, and the hand-written capability-based
+  `apply_<mode>` runs instead, so an unknown hotel monitor still gets `onescreen`. Every
+  active output goes through `apply_monitor_tf` with the transform spelled out, so the
+  rotation cycle and the `$FPFILE` handshake are unchanged. `vrr`/`bitdepth`/`cm` in the
+  JSON are ignored on purpose. The notification says "(hyprmon profile)" when the JSON path
+  ran. Seeded on 2026-10-15: `desktop` and `read`, generated from the existing geometry.
+  The dry run emitted the same `hyprctl` specs as the hand-written code. `trio`, `onescreen`
+  and `laptop` have no JSON: the demoset portable wasn't connected to capture its EDID, and
+  `onescreen` is generic by nature.
+  - **Why not hyprmon's own profile switching.** In 0.0.17, `applyProfile` and the `S` key
+    set the transform with a bare `hyprctl keyword monitor` (the stale-layout-box bug above).
+    They then rewrite the `monitor=` lines of `hyprland.conf`: ours has none, so hyprmon
+    *appends* port-bound lines after the `source` lines. A `.bak.<timestamp>` copy is left
+    behind and never pruned, only the profile's monitors are written, and every switch ends
+    with `hyprctl reload`. hyprmon also has no hotplug auto-switching (still on its roadmap).
+  - **`hyprmon-edit.sh`** launches it in a floating Kitty (`class hyprmon-edit`). It sets
+    `HYPRLAND_CONFIG` to `~/.local/state/hyprmon/scratch.conf`, which nothing sources. It
+    also puts a `hyprctl` shim first in `$PATH` that turns `reload` into a no-op plus a
+    notification, and passes every other call through; hyprmon resolves `hyprctl` through
+    `$PATH` at every call site. On quit it re-applies the current mode from `$STATE`. The
+    packaged `hyprmon.desktop` (`Exec=uwsm app -- hyprmon`) is shadowed by a same-ID override
+    pointing at the wrapper.
+  - **Residual gaps:** switching an *external* off with Hyprmon's `A` looks like an unplug,
+    so the daemon re-applies a profile ~3 s later. Toggling a monitor off/on and then
+    rotating it back to the profile's transform can leave a stale layout box that the quit
+    re-apply can't detect; `Super+M` twice fixes it.
+- **Monitors menu (added 2026-10-15)**, after Omarchy's *Setup > Monitors*:
+  `scripts/monitor-menu.sh`, a `walker --dmenu` list of the profiles that fit the connected
+  set (current one marked) plus *Edit layout (Hyprmon)* and *Show current layout*. Bound to `Super+Shift+M`
+  and exposed as the "Monitors" Walker entry (`~/.local/share/applications/monitors.desktop`).
+  Walker-launched copies run under the systemd `--user` manager, and `hyprctl` works there
+  because `HYPRLAND_INSTANCE_SIGNATURE` is in that environment (checked with
+  `systemctl --user show-environment`).
+- **Live-verified 2026-10-15**, with the repo pushed to live and the JSON path active:
+  - `read`: Xiaomi `0,0`, AQ16H `3072,0 transform 3`, eDP-1 off; a test window on WS 7
+    came out `1260×1992` (portrait).
+  - `desktop`: `0 / 2048 / 5120`, all `transform 0`; the test window came out `2028×1224`
+    (landscape). The daemon did **not** revert it within 15 s.
+  - Back to `read`: the same values again, workspaces back in place, swayosd active.
+  - Mismatched, corrupt or partial JSON profiles fell back to the hand-written path (dry run
+    with a stub `hyprctl`).
+  - **Side observation:** copying the `.conf` files to live triggered Hyprland's
+    auto-reload, which did snap the screens to the `monitors.conf` boot geometry (eDP-1 on,
+    AQ16H landscape at 5120) while `$STATE` still said `read`. Re-applying the profile fixed
+    it. Any edit to a sourced Hyprland file does this.
 
 ## 12. Other Configs
 
@@ -434,6 +493,7 @@ These are tracked in `system-state-findings.md` and `finish-installation-command
 | Plugging a USB device (Kobo e-reader) reshuffles the monitor layout | ✅ Resolved 2026-08-03 — **Topology:** every external pixel reaches this machine through **one** connector. Type-C `port0` (`/sys/devices/platform/USBC000:00/typec/port0`) binds `usb4_port1` → Thunderbolt `domain0` → **Plugable TBT4-UD5**, and both externals are DP tunnels over it (`card1-DP-1`, `card1-DP-2` on i915; the laptop's own `card0-HDMI-A-1` is NVIDIA and disconnected). That same connector's USB2 lane is `usb3-port4` on the **PCH xHCI `0000:00:14.0`**. The Kobo enumerated on **`usb 3-3` — root port 3 of that same controller**. **Kernel evidence** (23:13:35–23:14:08): four failed attempts with `error -71` (EPROTO), `usb usb3-port3: attempt power cycle`, two × `WARN: invalid context state for evaluate context command` (an xHCI **host-controller** fault, not device-level), `unable to enumerate USB device`, then a **30 s gap** before it finally came up on attempt 5. Failures were at full-speed (12M), the success at high-speed (480M) — the Kobo re-attaches its gadget after the on-device "Connect" prompt; the `-71` storm points at a marginal cable. When that controller fault reaches the Type-C side, the dock renegotiates and both DP tunnels drop/restore. **Amplifier (the actual damage):** `monitor-autoswitch.sh` acted on every raw event after a flat `sleep 0.5`, turning a sub-second blink into `remove → apply 'onescreen' → add → apply 'read'`, and `apply_onescreen` then still hardcoded the retired Samsung's `DP-1 1920×1080@120 scale 1`. **Fixes:** (1) daemon debounced — burst coalescing + two-sample stability check (§11); (2) `desktop`/`onescreen` made capability-based (row above); (3) `monitors.conf` monitors **and workspaces** bound by `desc:` (§1). Regression-tested offline with synthetic `.socket2` fixtures: a 6-event blink burst now yields exactly **one** apply, eDP-1-only and non-monitor events yield none, and an add re-applies even when the profile name is unchanged. ⚠ **Scope caveat:** on the 2026-08-03 plug the displays did **not** actually drop — zero DRM hotplug in the kernel log, zero monitor events in `hyprland.log` after startup, and `swayosd` `NRestarts=0` proves `monitor-mode.sh` never re-ran. The fault→tunnel-drop step is the mechanism *when* it fires, not something observed that evening; the amplifier bugs it would have hit were real and are what got fixed. **Mitigations:** plug the Kobo into a **dock** USB-A port (bus 2, controller `0000:00:0d.0` — a different xHCI, so a failed enumeration can't power-cycle a port beside the Thunderbolt connector), and use a known-good data cable. |
 | logind lid drop-in committed but never installed | ✅ Resolved 2026-10-12 — `configs/systemd/logind.conf.d/50-no-suspend-on-external-power.conf` (`HandleLidSwitchExternalPower=ignore`) was committed on 2026-07-12 as half of the GSP mitigation, and `shortcuts.md` §7 plus the GSP row described it as live. But `/etc/systemd/logind.conf.d/` did not exist: live `HandleLidSwitchExternalPower` was unset, falling back to `HandleLidSwitch=suspend`. Closing the lid at the desk still did nothing only because logind counted the TB4 monitors as docked (`HandleLidSwitchDocked=ignore`). **Exposure:** logind keeps re-evaluating while the lid is closed, so a dock blink with the lid shut would read as undocked on external power and suspend, which is the GSP resume-crash path. The Plugable TBT4-UD5 did drop both DP tunnels for ~5 s with no host-side trigger on 2026-10-07 22:14:46 and 2026-10-12 20:22:59, about a minute after boot each time. No such suspend happened: zero lid events in the journal (retained from 2026-09-30) before the fix. **Fix:** installed the repo file to `/etc/systemd/logind.conf.d/` and sent `systemctl kill -s HUP systemd-logind` (`Config file reloaded.`). **Verified 2026-10-12:** `HandleLidSwitchExternalPower` = `ignore`; a real lid close at 21:16:17 with the dock attached logged only `Lid closed.`, both TB4 monitors stayed on, no suspend. With the battery removed, `OnExternalPower` is always true, so the lid never suspends the machine until the replacement pack is fitted. **Lesson:** files mirrored from `/etc` can sit in the repo without being live; check the live path too. Steps: `finish-installation-commands.md` §15. |
 | Laptop battery failed; 80% charge cap for the replacement | 🔧 Installed 2026-10-12; the cap is not active until the replacement pack is fitted. The original pack died and was physically removed; a replacement is on order. Likely cause: long periods at 100% while docked, plus heat. **Why a WMI driver:** the in-kernel `acer_wmi` (7.2.8) exposes no charge limit, so TLP/powerdevil thresholds have nothing to write. The firmware does expose Acer's battery-health WMI interface (GUID `79772EC5-04B1-4BFD-843C-61E7F77B6CC9`, the one Acer Care Center uses), and AUR `acer-wmi-battery-dkms 0.2.0-2` drives it. The cap is fixed at 80% by firmware. **Pre-install checks:** test-built clean against both kernels (`7.2.8-1-cachyos` clang ThinLTO with `LLVM=1`, `6.18.52-1-cachyos-lts` GCC); PKGBUILD, install hook and C source reviewed; upstream lists the Predator Triton 300 SE as working, the PT516-52s is not listed. `configs/modprobe.d/acer-wmi-battery.conf` sets `enable_health_mode=1`, so every module load re-sends the cap. Rejected: `linuwu-sense-dkms`/DAMX, same 80% limiter but it replaces the in-kernel `acer_wmi`. **Install verified 2026-10-12:** DKMS built it for both kernels, the module loaded with the option in place, and `systemd-modules-load.service` is `active`. **But `health_mode` reads `0`:** the set call succeeds, yet the firmware reports the mode off right after. Most likely there is no pack for the EC to apply it to; not proven. **When the new pack is fitted:** boot, then `health_mode` must read `1`, the kernel log must say `active modes: health mode`, and `upower` must show charging stop near 80%. If it still reads `0`, the fallback is `linuwu-sense`, which drives the PredatorSense interface instead. Steps, verification, revert: `finish-installation-commands.md` §14. |
+| Monitor layouts only editable as hand-written coordinates | ✅ Resolved 2026-10-15/16. `hyprmon-bin 0.0.17-1` installed and verified, except a real drag-and-save, which nobody has done yet. **Before:** rearranging screens meant editing offsets like `$((2048 + EXT_OTHER_W))` in `monitor-mode.sh`, and there was no quick way into monitor settings. Omarchy has the same gap: its *Setup > Monitors* opens `monitors.lua` in an editor, and its manual points at Hyprmon (not installed by default). **Fix:** a hybrid. Hyprmon is the visual editor; `monitor-mode.sh` applies its profiles through `apply_from_profile` when the monitor set matches exactly, and falls back to the capability code otherwise. `hyprmon-edit.sh` blocks hyprmon's config write and reload. There is a `Super+Shift+M` / Walker "Monitors" menu. **Verified** with the JSON path live: `read` ↔ `desktop` give identical geometry to before, and the box test was portrait `1260×1992` and landscape `2028×1224`. The daemon held the manual choice. **After install (2026-10-16):** `hyprmon --list-profiles` shows `desktop` and `read *`, and `--active-profile` → `read`, so hyprmon accepts the seeded JSON as its own. A scripted session through the wrapper did `P` → `S` → `Q`. `P` wrote a profile identical to `read.json` on every applied field (`hardware_id`, mode, `X`/`Y`, scale, transform, active); only the Hz decimals differ. `S` wrote port-bound `monitor=` lines into the scratch file, which is what it would have appended to `hyprland.conf`. Geometry was unchanged while hyprmon was still open, so the reload was blocked. Quitting re-applied `read`, and the `.bak` copies were removed. A dry run fed the hyprmon-written JSON emitted the same specs as the seed. Rejected: adopting hyprmon wholesale, because its profile apply brings back the stale-layout-box bug, rewrites a config and reloads on every switch, has no auto-switch, and only knows specific monitors. Details: §11, `finish-installation-commands.md` §16. |
 
 ---
 
@@ -462,9 +522,15 @@ cachyPool/
     │   ├── monitors-read.conf         ← alternate "read" profile (not sourced)
     │   ├── windowrules.conf
     │   └── scripts/
-    │       ├── monitor-mode.sh        ← apply a named layout
+    │       ├── monitor-mode.sh        ← apply a named layout (hyprmon profile JSON if it matches, else hand-written)
     │       ├── monitor-autoswitch.sh  ← hotplug auto-switch daemon
+    │       ├── monitor-menu.sh        ← "Monitors" menu (Super+Shift+M + Walker "Monitors")
+    │       ├── hyprmon-edit.sh        ← hyprmon as profile editor, config write + reload neutered
     │       └── show-shortcuts.sh      ← keybinding cheatsheet popup (Super+/ + Walker "Shortcuts")
+    ├── hyprmon/                       ← mirrors ~/.config/hyprmon/
+    │   └── profiles/
+    │       ├── desktop.json           ← 3-across geometry, edited in hyprmon (`P`), applied by monitor-mode.sh
+    │       └── read.json              ← Xiaomi + portrait AQ16H, laptop off
     ├── waybar/
     │   ├── config.jsonc
     │   └── style.css
@@ -476,6 +542,8 @@ cachyPool/
     │   └── vlcrc                      ← hardware decode pinned off (avcodec-hw=none) — see §7 media note
     ├── applications/                  ← mirrors ~/.local/share/applications/
     │   ├── gimp.desktop               ← override: Name=GIMP (shadows the packaged entry) — §7
+    │   ├── hyprmon.desktop            ← override: Exec → hyprmon-edit.sh (shadows the packaged entry) — §11
+    │   ├── monitors.desktop           ← "Monitors" Walker entry → monitor-menu.sh
     │   └── shortcuts.desktop          ← "Shortcuts" Walker launcher entry
     ├── modprobe.d/                    ← mirrors /etc/modprobe.d/ (system path: push with `sudo install -Dm644`)
     │   └── acer-wmi-battery.conf      ← enable_health_mode=1 → 80% battery charge cap (§15)

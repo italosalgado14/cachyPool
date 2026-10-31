@@ -20,6 +20,7 @@ This is the day-to-day reference: the "memorize these first" cheatsheet up top, 
 | `Super` + `Q` | Close active window |
 | `Super` + `L` | Lock screen (Hyprlock) |
 | `Super` + `M` | Toggle monitor layout — `read`↔`desktop` (desk) / `read`↔`trio` (road); manual override of the auto-switcher, see §3 |
+| `Super` + `Shift` + `M` | Monitors menu — pick a profile (only the ones that fit the connected screens), open the Hyprmon layout editor, show the live layout (also a **Monitors** entry in Walker), see §3 |
 | `Super` + `Shift` + `Q` | Exit Hyprland (drops to tty1 → autologin re-`exec`s Hyprland; behaves like "restart compositor". To actually log out: `Ctrl+Alt+F2` → `loginctl terminate-user isalgado`) |
 
 > The full keybinding tables follow in §1. Workflows in §2. Walker / Yazi / Kitty deep-dives in §4–§6.
@@ -39,6 +40,7 @@ This is the day-to-day reference: the "memorize these first" cheatsheet up top, 
 | `Super` + `/` | Show the shortcuts cheatsheet (curated subset of this file; also a **Shortcuts** entry in Walker) |
 | `Super` + `L` | Lock screen (Hyprlock) |
 | `Super` + `M` | Toggle monitor layout — `read`↔`desktop` (desk) / `read`↔`trio` (road); manual override of the auto-switcher, see §3 |
+| `Super` + `Shift` + `M` | Monitors menu (Walker): fitting profiles · Hyprmon layout editor · live layout. Also a **Monitors** entry in Walker, see §3 |
 | `Super` + `Shift` + `Q` | Exit Hyprland (see Quick-reference footnote above) |
 
 ### 1.2 Walker modes (also reachable by typing a prefix character into Walker)
@@ -232,10 +234,36 @@ the layout automatically from what's plugged in:
   output is cycled off and on, so rotating without the cycle left windows sized for landscape
   on the portrait screen — content running off the right edge. Fixed 2026-08-04; profiles that
   don't change the rotation switch instantly as before.
-- Geometry for all profiles lives in `monitor-mode.sh`; full details in
-  `ACTUAL-CONFIGURATION.md` §11 "Monitor profiles & auto-switching".
+- **`Super` + `Shift` + `M` opens the Monitors menu** (also **Monitors** in Walker): pick
+  a profile (the current one is marked `●`), open the Hyprmon editor, or show the live
+  layout as a notification. It only lists the profiles that fit what's plugged in: `read`/
+  `desktop` at the desk, `trio`/`read` with the demoset portable, `onescreen` with one
+  external, `laptop` with none. The others overlap screens on the wrong set. Picking a
+  profile is a manual override, same as `Super` + `M`.
+- **Rearranging screens, macOS-style (since 2026-10-15):** menu → *Edit layout (Hyprmon)*
+  opens Hyprmon in a floating Kitty. Drag the screens with the mouse (or arrows / `hjkl`;
+  `G` grid size, `Shift`+`L` snapping, `R` scale, `C` advanced settings incl. rotation), press
+  `A` to preview live, then `P` and type the **profile's name** (`desktop`, `read`, `trio`, `onescreen`, `laptop`). Quit
+  with `Q`: the current profile is re-applied straight away, so a layout saved under the
+  **current** profile's name shows up immediately. One saved under another name shows
+  next time you switch to it. Saved so far: `desktop` and `read` (seeded from the hand-written
+  geometry, so nothing changed visually).
+  - **Never press `S`** in Hyprmon. In this setup it only writes a scratch file and its
+    `hyprctl reload` is blocked, but `P` is the key that saves a profile.
+  - Skip `O` (Hyprmon's own profile menu): it applies profiles the bare-keyword way. If you
+    use it anyway, quitting re-applies the current profile properly.
+  - Type the profile name; don't paste it. Hyprmon's name box only accepts one key at a time.
+  - Don't switch an **external** monitor off inside Hyprmon: the auto-switcher reads that
+    as an unplug and re-applies a profile ~3 s later.
+  - A saved profile only applies when **exactly** its monitors are connected (matched by
+    EDID, never by `DP-1`/`DP-2`). With any other set, e.g. a hotel monitor, the profile
+    falls back to the hand-written capability-based layout, so new screens still work.
+  - Hyprmon is AUR **`hyprmon-bin`**. Plain `hyprmon` on the AUR is an unrelated project.
+- Geometry: a saved Hyprmon profile (`~/.config/hyprmon/profiles/<name>.json`, mirrored in
+  `configs/hyprmon/profiles/`) wins; otherwise `monitor-mode.sh`'s hand-written layout.
+  Full details in `ACTUAL-CONFIGURATION.md` §11 "Monitor profiles & auto-switching".
 
-> If you want bigger UI on the laptop later: bump `eDP-1` scale to `1.333333` (2560 ÷ 1.333333 = **1920** logical) and shift the two externals right by the same 128 px — Xiaomi `@ 1920x0`, portable QHD `@ 4992x0` (1920 + 3072). Edit both `monitors.conf` and `apply_desktop`'s offsets in `monitor-mode.sh`, which currently assume eDP-1 is 2048 wide. See `system-state-findings.md` and `finish-installation-commands.md` for the math.
+> If you want bigger UI on the laptop later: bump `eDP-1` scale to `1.333333` (2560 ÷ 1.333333 = **1920** logical) and shift the two externals right by the same 128 px — Xiaomi `@ 1920x0`, portable QHD `@ 4992x0` (1920 + 3072). Easiest now: do it in Hyprmon (`R` or `[`/`]` for scale, drag the others left) and save with `P` as `desktop`. For the boot default, also edit `monitors.conf`. See `system-state-findings.md` and `finish-installation-commands.md` for the math.
 
 ---
 
@@ -316,7 +344,7 @@ The terminal uses JetBrains Mono Nerd Font 12pt + Catppuccin Mocha theme + 95% b
 - **Auto-lock:** 5 minutes of input idle
 - **Screen off:** 10 minutes
 - **Suspend:** 20 minutes, **battery only** (will require password to resume). On AC/USB-C power the machine stays awake — changed 2026-07-12 after a resume-from-suspend NVIDIA crash (see `ACTUAL-CONFIGURATION.md` §15, GSP row).
-- **Lid close:** ignored on external power (AC, USB-C PD, dock) and whenever docked with external monitors. Only on battery **and** undocked does it suspend, locking first. logind: `HandleLidSwitchExternalPower=ignore` in `/etc/systemd/logind.conf.d/50-no-suspend-on-external-power.conf`, written 2026-07-12 but only live since **2026-10-12**. While the battery is out (since 2026-10-12) the machine is always on external power, so the lid never suspends it.
+- **Lid close:** ignored on external power (AC, USB-C PD, dock) and whenever docked with external monitors. Only on battery **and** undocked does it suspend, locking first. logind: `HandleLidSwitchExternalPower=ignore` in `/etc/systemd/logind.conf.d/50-no-suspend-on-external-power.conf`, written 2026-07-12 but only live since **2026-10-12**. ⚠ **Live again since 2026-10-31:** with the replacement pack fitted the machine can be on battery, so lid-close-on-battery and hypridle's 20-min suspend both fire for the first time since 2026-10-12 — that is the NVIDIA GSP resume-crash path (`ACTUAL-CONFIGURATION.md` §15).
 - **Using it lid-closed on the dock:** works, and the TB4 monitors keep running. Stay in the `read` profile, which already turns the laptop panel off. In `desktop`, eDP-1 stays enabled behind the lid, holding workspaces 4–5, and the cursor can wander onto it. Idle lock (5 min) and screen-off (10 min) still apply with the lid closed; external keyboard or mouse input resets them.
 
 To customize timeouts: edit `~/.config/hypr/hypridle.conf`, then restart the daemon: `pkill hypridle; hyprctl dispatch exec hypridle` (`hyprctl reload` does **not** re-read hypridle.conf).
@@ -367,7 +395,7 @@ end
 | File | What it controls |
 |---|---|
 | `~/.config/hypr/keybindings.conf` | Add/remove keyboard shortcuts |
-| `~/.config/hypr/monitors.conf` | Display layout, scale, position |
+| `~/.config/hypr/monitors.conf` | **Boot-default** layout and workspace-to-monitor bindings. The live layout comes from the profiles (§3); edit those in Hyprmon. ⚠ Saving this file auto-reloads Hyprland, which snaps the screens to this geometry until the next profile switch (`Super` + `M` twice) |
 | `~/.config/hypr/autostart.conf` | What launches when you log in |
 
 After any change: `hyprctl reload` (no logout needed). Tracked copies live in `configs/hypr/` in this repo.
