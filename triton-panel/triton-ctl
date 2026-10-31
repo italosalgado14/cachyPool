@@ -1,0 +1,114 @@
+#!/usr/bin/env bash
+# triton-ctl -- the only privileged part of triton-panel.
+#
+# Lives at /usr/local/bin/triton-ctl and is reached through the single NOPASSWD
+# sudoers line in triton-panel.sudoers. Everything triton-panel *displays* it
+# reads directly as the user; this helper exists only for the sysfs nodes that
+# are root-write:
+#
+#   /sys/bus/wmi/drivers/acer-wmi-battery/health_mode    the 80% charge cap
+#   /sys/firmware/acpi/platform_profile                  the two states PPD can't reach
+#   /sys/devices/platform/acer-wmi/four_zoned_kb/...     keyboard backlight
+#
+# A NOPASSWD sudoers entry pointing at a file the invoking user can write IS
+# root, so this refuses to run unless root owns it. Install with:
+#
+#   sudo install -Dm755 -o root -g root triton-ctl /usr/local/bin/triton-ctl
+#
+# Nothing from argv is ever interpolated into a path or a command: every accepted
+# value is matched against a literal in a case statement. No eval.
+
+set -u
+
+if [[ "$(stat -c %u "$0" 2>/dev/null)" != 0 ]]; then
+  echo "triton-ctl: refusing to run, $0 is not owned by root" >&2
+  exit 1
+fi
+
+CAP=/sys/bus/wmi/drivers/acer-wmi-battery/health_mode
+PROFILE=/sys/firmware/acpi/platform_profile
+KBD=/sys/devices/platform/acer-wmi/four_zoned_kb/four_zone_mode
+
+usage() {
+  cat >&2 <<'USAGE'
+usage: triton-ctl <command>
+  cap on | cap off | cap status      80% battery charge cap
+  profile quiet | profile balanced-performance
+                                     the two platform_profile states that
+                                     power-profiles-daemon cannot select
+  kbd on | kbd off | kbd status      keyboard backlight (needs four_zoned_kb)
+USAGE
+  exit 2
+}
+
+# The acer-wmi-battery driver returns success even when the firmware rejected the
+# write, so every write is followed by a read-back and the read-back is what we
+# report. Established while testing the cap on 2026-10-31.
+write_and_verify() {
+  local path=$1 value=$2 got
+  printf '%s' "$value" > "$path" 2>/dev/null || {
+    echo "triton-ctl: write to $path failed" >&2
+    return 1
+  }
+  got="$(cat "$path" 2>/dev/null)"
+  if [[ "$got" != "$value" ]]; then
+    echo "triton-ctl: $path read back as '$got', not '$value'" >&2
+    return 1
+  fi
+  printf '%s\n' "$got"
+}
+
+# Keyboard backlight through four_zone_mode, whose parser wants exactly seven
+# comma-separated uints: mode,speed,brightness,direction,red,green,blue
+# (verified against four_zone_mode_store in the acer-wmi-linuwu source).
+# mode 0 is STATIC, which makes the driver zero speed and direction itself, and
+# ACER_KBD_BRIGHTNESS_MAX is 100. So "off" is brightness 0 and "on" is 100.
+KBD_ON='0,0,100,0,255,255,255'
+KBD_OFF='0,0,0,0,255,255,255'
+
+(( $# >= 1 )) || usage
+
+case "$1" in
+  cap)
+    (( $# == 2 )) || usage
+    [[ -w $CAP ]] || { echo "triton-ctl: $CAP missing -- is acer-wmi-battery loaded?" >&2; exit 1; }
+    case "$2" in
+      on)     write_and_verify "$CAP" 1 ;;
+      off)    write_and_verify "$CAP" 0 ;;
+      status) cat "$CAP" ;;
+      *)      usage ;;
+    esac
+    ;;
+
+  profile)
+    (( $# == 2 )) || usage
+    [[ -w $PROFILE ]] || { echo "triton-ctl: $PROFILE missing -- is predator_v4=1 set?" >&2; exit 1; }
+    # Deliberately only the two states power-profiles-daemon has no target for.
+    # low-power/balanced/performance must go through `powerprofilesctl set` so
+    # PPD also applies its intel_pstate EPP; writing them here would bypass that.
+    case "$2" in
+      quiet|balanced-performance) write_and_verify "$PROFILE" "$2" ;;
+      low-power|balanced|performance)
+        echo "triton-ctl: use 'powerprofilesctl set' for $2, not this helper" >&2
+        exit 2
+        ;;
+      *) usage ;;
+    esac
+    ;;
+
+  kbd)
+    (( $# == 2 )) || usage
+    [[ -w $KBD ]] || {
+      echo "triton-ctl: $KBD missing -- the in-tree acer_wmi has no four_zoned_kb" >&2
+      exit 1
+    }
+    case "$2" in
+      on)     printf '%s' "$KBD_ON"  > "$KBD" ;;
+      off)    printf '%s' "$KBD_OFF" > "$KBD" ;;
+      status) cat "$KBD" ;;
+      *)      usage ;;
+    esac
+    ;;
+
+  *) usage ;;
+esac

@@ -1,0 +1,13 @@
+# Installed to /etc/sudoers.d/triton-panel, mode 0440, owned by root:root.
+#
+# ALWAYS validate before installing -- a syntax error anywhere in sudoers.d
+# locks you out of sudo entirely, and you would need a root shell to undo it:
+#
+#   sudo visudo -cf triton-panel.sudoers
+#   sudo install -Dm440 -o root -g root triton-panel.sudoers /etc/sudoers.d/triton-panel
+#
+# triton-ctl is the only privileged part of triton-panel. It takes no path
+# arguments -- every value it accepts is matched against a literal in a case
+# statement -- and it refuses to run unless root owns it, because a NOPASSWD
+# rule pointing at a user-writable file is simply root. Grant nothing else here.
+isalgado ALL=(root) NOPASSWD: /usr/local/bin/triton-ctl

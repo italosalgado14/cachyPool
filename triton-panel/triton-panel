@@ -1,0 +1,973 @@
+#!/usr/bin/env python3
+"""triton-panel -- a small GTK4/libadwaita panel for this machine's own hardware.
+
+Acer Predator Triton 500 SE (PT516-52s, "triton500se"), CachyOS + Hyprland.
+
+Why this exists rather than mission-center/psensor/CoolerControl: everything
+interesting on this laptop sits behind the Acer EC, and no general-purpose tool
+reads it. mission-center shows no fans at all; CoolerControl is a *fan control*
+front end and this machine has no PWM control (see below); psensor graphs RPM but
+cannot touch the charge cap or the platform profile. This panel does the four
+things that are specific to this box -- fans, EC temperatures, the 5-state
+platform profile and the 80% charge cap -- plus the ordinary CPU/RAM/GPU numbers,
+in one window launched from Walker.
+
+Hard dependencies on the rest of the setup, all documented in the repo:
+
+  * The acer_wmi hwmon and /sys/firmware/acpi/platform_profile only exist when
+    acer_wmi is loaded with predator_v4=1 (/etc/modprobe.d/acer-wmi-predator-v4.conf).
+    The PT516-52s is absent from the driver's DMI quirk table, so without that
+    parameter there are no fans and no platform profile. Every group here
+    degrades to "unavailable" with the reason instead of showing zeros.
+  * The charge cap is the out-of-tree acer-wmi-battery DKMS module. The in-kernel
+    acer_wmi has no charge-limit support and BAT1 exposes no charge_control_*
+    node, so TLP/powerdevil thresholds do nothing on this machine.
+  * Writing any of those needs root, which is why the three write paths go
+    through `sudo -n triton-ctl` and nothing else here needs privileges.
+
+Deliberate design choices worth keeping:
+
+  * hwmon indices are NEVER hardcoded. They are handed out in probe order and
+    move between boots (and across a module reload). Chips are found by their
+    `name` file and re-scanned when a path disappears.
+  * The discrete GPU is left alone. It sits in runtime-PM D3cold almost all the
+    time, and `nvidia-smi` is a userspace open of the device -- polling it every
+    two seconds would keep an idle 3080 Ti awake and drain the battery. So the
+    dGPU row reads only its runtime_status/runtime_suspended_time (free, two
+    sysfs files). nvidia-smi runs at most once every DGPU_POLL_SECONDS and only
+    while the GPU already reads active, and a manual "Read now" holds the loop
+    off for a minute afterwards so that one press cannot turn into a poll the
+    GPU can never escape.
+  * Fans reading 0 RPM is not a failure. This laptop stops them below roughly
+    50 C (measured 2026-10-31: 0/0 at 41 C, 2564/2307 at 56 C under load).
+  * The three platform profiles that power-profiles-daemon can target are set
+    THROUGH ppd, so it also applies its intel_pstate EPP. Only `quiet` and
+    `balanced-performance` -- which ppd has no target for -- are written
+    directly, and ppd then relabels itself, which the UI warns about.
+"""
+
+import os
+import glob
+import math
+import subprocess
+import time
+
+import gi
+
+gi.require_version("Gtk", "4.0")
+gi.require_version("Adw", "1")
+from gi.repository import Adw, Gio, GLib, Gtk  # noqa: E402
+
+APP_ID = "dev.isalgado.TritonPanel"
+HELPER = "/usr/local/bin/triton-ctl"
+POLL_SECONDS = 2
+HISTORY = 150  # 150 samples x 2 s = 5 minutes of graph
+
+# How the discrete GPU is handled. nvidia-smi is a userspace open of the device,
+# so our own reads reset its runtime-PM idle timer. The floor bounds how often
+# the poll loop may touch an already-busy GPU; the hold stops a single press of
+# "Read now" from bootstrapping a poll the GPU could never escape -- it would
+# read "active" on every tick, and every tick would push its idle timer out.
+DGPU_POLL_SECONDS = 10
+DGPU_MANUAL_HOLD_SECONDS = 60
+
+ACER_PLATFORM = "/sys/devices/platform/acer-wmi"
+PLATFORM_PROFILE = "/sys/firmware/acpi/platform_profile"
+PLATFORM_CHOICES = "/sys/firmware/acpi/platform_profile_choices"
+BATTERY_WMI = "/sys/bus/wmi/drivers/acer-wmi-battery"
+BAT = "/sys/class/power_supply/BAT1"
+AC = "/sys/class/power_supply/ACAD"
+IGPU_PCI = "/sys/bus/pci/devices/0000:00:02.0"
+DGPU_PCI = "/sys/bus/pci/devices/0000:01:00.0"
+THUNDERBOLT = "/sys/bus/thunderbolt/devices"
+
+# power-profiles-daemon has only three targets, so two of the five platform
+# states are unreachable through it and must be written directly.
+PPD_FOR_PLATFORM = {
+    "low-power": "power-saver",
+    "balanced": "balanced",
+    "performance": "performance",
+}
+
+
+# --------------------------------------------------------------------------- #
+# sysfs plumbing
+# --------------------------------------------------------------------------- #
+
+def read_text(path, default=None):
+    try:
+        with open(path) as handle:
+            return handle.read().strip()
+    except OSError:
+        return default
+
+
+def read_int(path, default=None):
+    raw = read_text(path)
+    try:
+        return int(raw)
+    except (TypeError, ValueError):
+        return default
+
+
+def find_hwmon(name):
+    """Directory of the hwmon chip called `name`, or None.
+
+    Resolved on every miss rather than cached forever: reloading acer_wmi gives
+    its hwmon a brand new index, and the panel should pick that up without a
+    restart.
+    """
+    for candidate in sorted(glob.glob("/sys/class/hwmon/hwmon*")):
+        if read_text(os.path.join(candidate, "name")) == name:
+            return candidate
+    return None
+
+
+class Sampler:
+    """One snapshot of the machine per call to `sample()`.
+
+    Every field can be None. The UI is written to expect that, because which
+    nodes exist depends on whether predator_v4 is set and whether the DKMS
+    battery module is loaded.
+    """
+
+    def __init__(self):
+        self._acer = None
+        self._coretemp = None
+        self._prev_cpu = None
+        self._dgpu_last = None        # last live reading, reused between polls
+        self._dgpu_last_poll = 0.0    # monotonic time of our last nvidia-smi
+        self._dgpu_quiet_until = 0.0  # the loop must not touch the GPU before this
+
+    # -- chip lookup, revalidated cheaply ----------------------------------- #
+
+    def _chip(self, attr, name):
+        path = getattr(self, attr)
+        if path is None or not os.path.isdir(path):
+            path = find_hwmon(name)
+            setattr(self, attr, path)
+        return path
+
+    # -- individual readings ------------------------------------------------ #
+
+    def _cpu_percent(self):
+        """Whole-CPU busy percentage between this call and the previous one."""
+        fields = (read_text("/proc/stat") or "").split("\n")[0].split()
+        if len(fields) < 8 or fields[0] != "cpu":
+            return None
+        values = [int(v) for v in fields[1:8]]
+        idle = values[3] + values[4]
+        total = sum(values)
+        previous, self._prev_cpu = self._prev_cpu, (idle, total)
+        if previous is None:
+            return None
+        idle_delta = idle - previous[0]
+        total_delta = total - previous[1]
+        if total_delta <= 0:
+            return None
+        return max(0.0, min(100.0, 100.0 * (1.0 - idle_delta / total_delta)))
+
+    def _cpu_mhz(self):
+        freqs = [
+            read_int(p)
+            for p in glob.glob("/sys/devices/system/cpu/cpufreq/policy*/scaling_cur_freq")
+        ]
+        freqs = [f for f in freqs if f]
+        return sum(freqs) / len(freqs) / 1000.0 if freqs else None
+
+    def _memory(self):
+        info = {}
+        for line in (read_text("/proc/meminfo") or "").splitlines():
+            key, _, rest = line.partition(":")
+            info[key] = int(rest.split()[0]) if rest.split() else 0
+        total = info.get("MemTotal", 0)
+        available = info.get("MemAvailable", 0)
+        swap_total = info.get("SwapTotal", 0)
+        swap_free = info.get("SwapFree", 0)
+        if not total:
+            return None
+        return {
+            "used_gib": (total - available) / 1048576.0,
+            "total_gib": total / 1048576.0,
+            "percent": 100.0 * (total - available) / total,
+            # Swap here is zram only: there is no disk swap and no resume=, so
+            # this machine cannot hibernate.
+            "zram_used_gib": (swap_total - swap_free) / 1048576.0,
+            "zram_total_gib": swap_total / 1048576.0,
+        }
+
+    def _dgpu(self):
+        """dGPU state. Never wakes a sleeping GPU, never keeps an idle one up.
+
+        The two sysfs reads are free. nvidia-smi is not: it opens the device, so
+        calling it on every tick would hold an otherwise idle 3080 Ti out of
+        D3cold indefinitely. Hence the floor and the post-manual-read hold.
+        """
+        status = read_text(os.path.join(DGPU_PCI, "power/runtime_status"))
+        if status is None:
+            return None
+        suspended_ms = read_int(os.path.join(DGPU_PCI, "power/runtime_suspended_time"), 0)
+        state = {"status": status, "suspended_minutes": suspended_ms / 60000.0}
+        if status != "active":
+            self._dgpu_last = None
+            return state
+
+        now = time.monotonic()
+        if now >= self._dgpu_quiet_until and now - self._dgpu_last_poll >= DGPU_POLL_SECONDS:
+            self._dgpu_last_poll = now
+            live = self._dgpu_live()
+            if live:
+                self._dgpu_last = live
+        if self._dgpu_last:
+            state.update(self._dgpu_last)
+        return state
+
+    def _dgpu_live(self):
+        """nvidia-smi, only ever called when the GPU is already awake."""
+        try:
+            out = subprocess.run(
+                [
+                    "nvidia-smi",
+                    "--query-gpu=temperature.gpu,utilization.gpu,memory.used,power.draw",
+                    "--format=csv,noheader,nounits",
+                ],
+                capture_output=True, text=True, timeout=4, check=True,
+            ).stdout.strip()
+        except (OSError, subprocess.SubprocessError):
+            return None
+        parts = [p.strip() for p in out.split(",")]
+        if len(parts) != 4:
+            return None
+        try:
+            return {
+                "temp_c": float(parts[0]),
+                "util_percent": float(parts[1]),
+                "mem_used_mib": float(parts[2]),
+                "power_w": float(parts[3]),
+            }
+        except ValueError:
+            return None
+
+    def wake_dgpu_and_read(self):
+        """Explicit, user-initiated read -- the only path that may wake the GPU.
+
+        Afterwards the loop is held off, because the GPU this call just woke
+        would otherwise read "active" on the very next tick and every tick after
+        that would renew its idle timer. The hold lets it fall back to D3.
+        """
+        live = self._dgpu_live()
+        self._dgpu_quiet_until = time.monotonic() + DGPU_MANUAL_HOLD_SECONDS
+        self._dgpu_last_poll = self._dgpu_quiet_until
+        if live:
+            self._dgpu_last = live
+        return live
+
+    def _battery(self):
+        if not os.path.isdir(BAT):
+            return None
+        now = read_int(os.path.join(BAT, "charge_now"))
+        full = read_int(os.path.join(BAT, "charge_full"))
+        design = read_int(os.path.join(BAT, "charge_full_design"))
+        current = read_int(os.path.join(BAT, "current_now"), 0) or 0
+        voltage = read_int(os.path.join(BAT, "voltage_now"), 0) or 0
+        status = read_text(os.path.join(BAT, "status"), "unknown")
+        return {
+            "percent": read_int(os.path.join(BAT, "capacity")),
+            "status": status,
+            "cycles": read_int(os.path.join(BAT, "cycle_count")),
+            # charge_* is uAh and voltage_now is uV, so the product is pW.
+            # current_now's sign convention is not consistent across ACPI
+            # implementations, so the direction comes from `status`, not the sign.
+            "power_w": abs(current) * voltage / 1e12,
+            "health_percent": 100.0 * full / design if full and design else None,
+            "wh_now": now * voltage / 1e12 if now and voltage else None,
+            # The cap lives on the DKMS module, not on BAT1.
+            "cap": read_int(os.path.join(BATTERY_WMI, "health_mode")),
+            "temp_c": (
+                read_int(os.path.join(BATTERY_WMI, "temperature"), 0) / 1000.0
+                if read_text(os.path.join(BATTERY_WMI, "temperature")) else None
+            ),
+        }
+
+    def _power_source(self):
+        """Where the power is coming from.
+
+        Worth a row on this machine: the TB4 dock feeds it over USB-C PD, so
+        ACAD can read online with no barrel jack attached. That is the same
+        reason anything deciding "on battery?" must look at BAT1/status.
+        """
+        usb = [
+            os.path.basename(p)
+            for p in glob.glob("/sys/class/power_supply/ucsi-source-psy-*")
+            if read_int(os.path.join(p, "online")) == 1
+        ]
+        return {
+            "ac_online": read_int(os.path.join(AC, "online")),
+            "usb_pd_ports": len(usb),
+        }
+
+    def _dock(self):
+        for device in sorted(glob.glob(os.path.join(THUNDERBOLT, "*-*"))):
+            vendor = read_text(os.path.join(device, "vendor_name"))
+            model = read_text(os.path.join(device, "device_name"))
+            if vendor and model and "INTEL" not in vendor.upper():
+                return f"{vendor} {model}"
+        return None
+
+    # -- the snapshot ------------------------------------------------------- #
+
+    def sample(self):
+        acer = self._chip("_acer", "acer")
+        coretemp = self._chip("_coretemp", "coretemp")
+
+        fans = {}
+        temps = {}
+        if acer:
+            fans["Fan 1"] = read_int(os.path.join(acer, "fan1_input"))
+            fans["Fan 2"] = read_int(os.path.join(acer, "fan2_input"))
+            # temp2_input is wired but reads 0 on this board; skip it.
+            for label, node in (("EC 1", "temp1_input"), ("EC 2", "temp3_input")):
+                value = read_int(os.path.join(acer, node))
+                if value:
+                    temps[label] = value / 1000.0
+        if coretemp:
+            package = read_int(os.path.join(coretemp, "temp1_input"))
+            if package:
+                temps["CPU pkg"] = package / 1000.0
+        for nvme in sorted(glob.glob("/sys/class/hwmon/hwmon*")):
+            if read_text(os.path.join(nvme, "name")) == "nvme":
+                value = read_int(os.path.join(nvme, "temp1_input"))
+                if value:
+                    temps.setdefault("NVMe", value / 1000.0)
+
+        igpu_mhz = None
+        for node in glob.glob(os.path.join(IGPU_PCI, "drm/card*/gt_cur_freq_mhz")):
+            igpu_mhz = read_int(node)
+            break
+
+        dgpu = self._dgpu()
+        if dgpu and "temp_c" in dgpu:
+            temps["dGPU"] = dgpu["temp_c"]
+
+        return {
+            "acer_available": acer is not None,
+            "fans": fans,
+            "temps": temps,
+            "cpu_percent": self._cpu_percent(),
+            "cpu_mhz": self._cpu_mhz(),
+            "memory": self._memory(),
+            "igpu_mhz": igpu_mhz,
+            "dgpu": dgpu,
+            "battery": self._battery(),
+            "power": self._power_source(),
+            "dock": self._dock(),
+            "platform_profile": read_text(PLATFORM_PROFILE),
+            "platform_choices": (read_text(PLATFORM_CHOICES) or "").split(),
+            "kbd_available": os.path.isdir(os.path.join(ACER_PLATFORM, "four_zoned_kb")),
+            "kbd_mode": read_text(os.path.join(ACER_PLATFORM, "four_zoned_kb/four_zone_mode")),
+        }
+
+
+# --------------------------------------------------------------------------- #
+# A small multi-series Cairo plot
+# --------------------------------------------------------------------------- #
+
+class Graph(Gtk.DrawingArea):
+    """Line chart over the last HISTORY samples.
+
+    Colours are fixed RGB because they have to read on both the light and dark
+    libadwaita themes; the axis text and grid borrow the widget's own foreground
+    colour so they follow the theme.
+    """
+
+    AXIS_WIDTH = 44
+    LEGEND_HEIGHT = 18
+    GRID_LINES = 5
+
+    def __init__(self, unit, colours, minimum_span):
+        super().__init__()
+        self.unit = unit
+        self.colours = colours
+        self.minimum_span = minimum_span  # keeps a flat line from filling the box
+        self.series = {}
+        self.set_content_height(150)
+        self.set_draw_func(self._draw)
+
+    def push(self, values):
+        for label in list(self.series) + list(values):
+            history = self.series.setdefault(label, [])
+            history.append(values.get(label))
+            del history[:-HISTORY]
+        self.queue_draw()
+
+    @staticmethod
+    def _nice_step(span, divisions):
+        """A round step -- 1, 2 or 5 times a power of ten.
+
+        Without this the axis is labelled off the raw data range and reads
+        0 / 671 / 1341 / 2012, which is hard to compare against at a glance and
+        reshuffles every time the maximum moves.
+
+        2.5 is deliberately not on the ladder: the labels are drawn as whole
+        numbers, so a 2.5 step prints 38 / 40 / 42 / 45 / 48 / 50 -- gaps that
+        look uneven because two of them are rounded.
+        """
+        rough = span / divisions
+        if rough <= 0:
+            return 1.0
+        magnitude = 10.0 ** math.floor(math.log10(rough))
+        for multiple in (1.0, 2.0, 5.0):
+            if rough <= magnitude * multiple:
+                return magnitude * multiple
+        return magnitude * 10.0
+
+    def _bounds(self):
+        """(low, high, step), all snapped to the round step."""
+        points = [v for h in self.series.values() for v in h if v is not None]
+        if not points:
+            return None
+        low, high = min(points), max(points)
+        if high - low < self.minimum_span:
+            middle = (high + low) / 2.0
+            low, high = middle - self.minimum_span / 2.0, middle + self.minimum_span / 2.0
+        step = self._nice_step(high - low, self.GRID_LINES)
+        bottom, top = min(points), max(points)
+        low = max(0.0, math.floor(low / step) * step)
+        high = math.ceil(high / step) * step
+        # Snapping alone can land a bound exactly on the data, which draws the
+        # trace along the frame. Push that side out by one more step -- except
+        # a zero floor, which is where fan RPM genuinely belongs.
+        if low >= bottom and low > 0:
+            low -= step
+        if high <= top:
+            high += step
+        return low, high, step
+
+    def _draw(self, _area, cr, width, height):
+        fg = self.get_color()
+        cr.select_font_face("monospace")
+        cr.set_font_size(11)
+
+        bounds = self._bounds()
+        if bounds is None:
+            cr.set_source_rgba(fg.red, fg.green, fg.blue, 0.5)
+            cr.move_to(8, height / 2)
+            cr.show_text("no data")
+            return
+        low, high, step = bounds
+
+        top = self.LEGEND_HEIGHT + 4
+        plot_height = height - top - 4
+        plot_width = width - self.AXIS_WIDTH - 6
+
+        def y_of(value):
+            return top + plot_height * (1.0 - (value - low) / (high - low))
+
+        # Grid and axis labels, placed on the round step rather than on
+        # fractions of the range, so the numbers hold still while data moves.
+        for index in range(int(round((high - low) / step)) + 1):
+            value = low + step * index
+            y = y_of(value)
+            cr.set_source_rgba(fg.red, fg.green, fg.blue, 0.12)
+            cr.set_line_width(1)
+            cr.move_to(self.AXIS_WIDTH, y)
+            cr.line_to(width - 6, y)
+            cr.stroke()
+            cr.set_source_rgba(fg.red, fg.green, fg.blue, 0.55)
+            cr.move_to(4, y + 4)
+            cr.show_text(f"{value:5.0f}")
+
+        # Legend across the top, with each series' latest value.
+        x = self.AXIS_WIDTH
+        for label, history in self.series.items():
+            red, green, blue = self.colours.get(label, (0.6, 0.6, 0.6))
+            latest = next((v for v in reversed(history) if v is not None), None)
+            text = f"{label} {latest:.0f}{self.unit}" if latest is not None else f"{label} --"
+            cr.set_source_rgb(red, green, blue)
+            cr.rectangle(x, 4, 8, 8)
+            cr.fill()
+            cr.move_to(x + 12, 12)
+            cr.show_text(text)
+            x += 12 + cr.text_extents(text)[4] + 14
+
+        # One polyline per series, breaking the line wherever a sample is missing.
+        cr.set_line_width(1.6)
+        for label, history in self.series.items():
+            red, green, blue = self.colours.get(label, (0.6, 0.6, 0.6))
+            cr.set_source_rgb(red, green, blue)
+            step = plot_width / max(1, HISTORY - 1)
+            drawing = False
+            for index, value in enumerate(history):
+                if value is None:
+                    drawing = False
+                    continue
+                x = self.AXIS_WIDTH + (index + HISTORY - len(history)) * step
+                y = y_of(value)
+                if drawing:
+                    cr.line_to(x, y)
+                else:
+                    cr.move_to(x, y)
+                    drawing = True
+            cr.stroke()
+
+
+TEMP_COLOURS = {
+    "CPU pkg": (0.90, 0.33, 0.29),
+    "EC 1": (0.82, 0.59, 0.10),
+    "EC 2": (0.25, 0.72, 0.31),
+    "NVMe": (0.35, 0.65, 1.00),
+    "dGPU": (0.74, 0.55, 1.00),
+}
+FAN_COLOURS = {
+    "Fan 1": (0.35, 0.65, 1.00),
+    "Fan 2": (0.25, 0.72, 0.31),
+}
+
+
+# --------------------------------------------------------------------------- #
+# Window
+# --------------------------------------------------------------------------- #
+
+class TritonWindow(Adw.ApplicationWindow):
+
+    def __init__(self, application):
+        super().__init__(
+            application=application,
+            title="Triton Panel",
+            default_width=840,
+            default_height=820,
+        )
+        self.sampler = Sampler()
+        self.ppd = self._ppd_proxy()
+        # Set while the poll loop is pushing state into widgets, so the widgets'
+        # own change handlers do not treat that as a click from the user.
+        self._updating = False
+        self._profile_choices = []
+        self._build_ui()
+        self._refresh()
+        GLib.timeout_add_seconds(POLL_SECONDS, self._refresh)
+
+    # -- infrastructure ----------------------------------------------------- #
+
+    @staticmethod
+    def _ppd_proxy():
+        try:
+            return Gio.DBusProxy.new_for_bus_sync(
+                Gio.BusType.SYSTEM, Gio.DBusProxyFlags.NONE, None,
+                "net.hadess.PowerProfiles", "/net/hadess/PowerProfiles",
+                "net.hadess.PowerProfiles", None,
+            )
+        except GLib.Error:
+            return None
+
+    def _toast(self, message, timeout=5):
+        toast = Adw.Toast(title=message)
+        toast.set_timeout(timeout)
+        self.toasts.add_toast(toast)
+
+    def _helper(self, *arguments):
+        """Run triton-ctl through sudo -n. Returns (ok, text)."""
+        try:
+            done = subprocess.run(
+                ["sudo", "-n", HELPER, *arguments],
+                capture_output=True, text=True, timeout=8,
+            )
+        except (OSError, subprocess.SubprocessError) as error:
+            return False, str(error)
+        if done.returncode == 0:
+            return True, done.stdout.strip()
+        message = (done.stderr or done.stdout).strip() or f"exit {done.returncode}"
+        if "password" in message.lower():
+            message = ("triton-ctl has no sudoers rule yet -- install "
+                       "triton-panel.sudoers to /etc/sudoers.d/triton-panel")
+        return False, message
+
+    # -- construction ------------------------------------------------------- #
+
+    def _build_ui(self):
+        self.toasts = Adw.ToastOverlay()
+        layout = Adw.ToolbarView()
+        layout.add_top_bar(Adw.HeaderBar())
+        page = Adw.PreferencesPage()
+        layout.set_content(page)
+        self.toasts.set_child(layout)
+        self.set_content(self.toasts)
+
+        self.temp_graph = Graph("°C", TEMP_COLOURS, minimum_span=12.0)
+        self.fan_graph = Graph(" rpm", FAN_COLOURS, minimum_span=600.0)
+        page.add(self._graph_group("Temperatures", self.temp_graph))
+        page.add(self._graph_group("Fans", self.fan_graph))
+
+        page.add(self._load_group())
+        page.add(self._power_group())
+        page.add(self._battery_group())
+        page.add(self._keyboard_group())
+
+    @staticmethod
+    def _graph_group(title, graph):
+        group = Adw.PreferencesGroup(title=title)
+        frame = Gtk.Box()
+        frame.add_css_class("card")
+        frame.set_margin_top(2)
+        graph.set_margin_top(8)
+        graph.set_margin_bottom(8)
+        graph.set_margin_start(8)
+        graph.set_margin_end(8)
+        graph.set_hexpand(True)
+        frame.append(graph)
+        group.add(frame)
+        return group
+
+    @staticmethod
+    def _meter_row(title):
+        row = Adw.ActionRow(title=title)
+        value = Gtk.Label(xalign=1.0)
+        value.add_css_class("numeric")
+        value.add_css_class("dim-label")
+        meter = Gtk.LevelBar(min_value=0, max_value=100)
+        meter.set_size_request(130, -1)
+        meter.set_valign(Gtk.Align.CENTER)
+        row.add_suffix(value)
+        row.add_suffix(meter)
+        return row, value, meter
+
+    def _load_group(self):
+        group = Adw.PreferencesGroup(
+            title="Load",
+            description="14 cores / 20 threads, i9-12900H · 32 GiB · RTX 3080 Ti offload",
+        )
+        self.cpu_row, self.cpu_value, self.cpu_meter = self._meter_row("CPU")
+        self.ram_row, self.ram_value, self.ram_meter = self._meter_row("Memory")
+        group.add(self.cpu_row)
+        group.add(self.ram_row)
+
+        self.igpu_row = Adw.ActionRow(title="iGPU", subtitle="Intel — runs the compositor")
+        self.igpu_value = Gtk.Label(xalign=1.0)
+        self.igpu_value.add_css_class("numeric")
+        self.igpu_value.add_css_class("dim-label")
+        self.igpu_row.add_suffix(self.igpu_value)
+        group.add(self.igpu_row)
+
+        self.dgpu_row = Adw.ActionRow(title="dGPU")
+        self.dgpu_value = Gtk.Label(xalign=1.0)
+        self.dgpu_value.add_css_class("numeric")
+        self.dgpu_value.add_css_class("dim-label")
+        wake = Gtk.Button(label="Read now")
+        wake.set_valign(Gtk.Align.CENTER)
+        wake.set_tooltip_text(
+            "Runs nvidia-smi once. This is the only thing here that can wake the "
+            "discrete GPU; the poll loop never does."
+        )
+        wake.connect("clicked", self._on_wake_dgpu)
+        self.dgpu_row.add_suffix(self.dgpu_value)
+        self.dgpu_row.add_suffix(wake)
+        group.add(self.dgpu_row)
+        return group
+
+    def _power_group(self):
+        group = Adw.PreferencesGroup(title="Power")
+        self.profile_row = Adw.ComboRow(title="Platform profile")
+        self.profile_row.set_model(Gtk.StringList())
+        self.profile_row.connect("notify::selected", self._on_profile_selected)
+        group.add(self.profile_row)
+
+        self.ppd_row = Adw.ActionRow(title="power-profiles-daemon")
+        self.ppd_value = Gtk.Label(xalign=1.0)
+        self.ppd_value.add_css_class("dim-label")
+        self.ppd_row.add_suffix(self.ppd_value)
+        group.add(self.ppd_row)
+
+        self.source_row = Adw.ActionRow(title="Power source")
+        self.source_value = Gtk.Label(xalign=1.0)
+        self.source_value.add_css_class("dim-label")
+        self.source_row.add_suffix(self.source_value)
+        group.add(self.source_row)
+
+        self.dock_row = Adw.ActionRow(title="Thunderbolt")
+        self.dock_value = Gtk.Label(xalign=1.0)
+        self.dock_value.add_css_class("dim-label")
+        self.dock_row.add_suffix(self.dock_value)
+        group.add(self.dock_row)
+        return group
+
+    def _battery_group(self):
+        group = Adw.PreferencesGroup(title="Battery")
+        self.cap_row = Adw.SwitchRow(
+            title="80% charge cap",
+            subtitle="Acer health mode, via acer-wmi-battery",
+        )
+        self.cap_row.connect("notify::active", self._on_cap_toggled)
+        group.add(self.cap_row)
+
+        self.bat_row = Adw.ActionRow(title="State")
+        self.bat_value = Gtk.Label(xalign=1.0)
+        self.bat_value.add_css_class("numeric")
+        self.bat_value.add_css_class("dim-label")
+        self.bat_row.add_suffix(self.bat_value)
+        group.add(self.bat_row)
+
+        self.health_row = Adw.ActionRow(title="Health")
+        self.health_value = Gtk.Label(xalign=1.0)
+        self.health_value.add_css_class("numeric")
+        self.health_value.add_css_class("dim-label")
+        self.health_row.add_suffix(self.health_value)
+        group.add(self.health_row)
+        return group
+
+    def _keyboard_group(self):
+        group = Adw.PreferencesGroup(title="Keyboard")
+        self.kbd_row = Adw.SwitchRow(title="Backlight")
+        self.kbd_row.connect("notify::active", self._on_kbd_toggled)
+        group.add(self.kbd_row)
+        return group
+
+    # -- the poll loop ------------------------------------------------------ #
+
+    def _ppd_state(self):
+        """(active profile, note about its driver) from power-profiles-daemon.
+
+        The note matters: until ppd is restarted after predator_v4 appears it
+        keeps reporting PlatformDriver "placeholder", which means switching
+        profiles moves the intel_pstate EPP and nothing thermal.
+        """
+        if self.ppd is None:
+            return None, "not running"
+        active = self.ppd.get_cached_property("ActiveProfile")
+        active = active.unpack() if active else None
+        profiles = self.ppd.get_cached_property("Profiles")
+        note = ""
+        if profiles:
+            # Asked of the daemon, not of the active profile: ppd omits
+            # PlatformDriver entirely from the "performance" entry, so
+            # checking only the active profile hid this warning in exactly
+            # the case that needs it -- performance selected.
+            if any(entry.get("PlatformDriver", "") == "placeholder"
+                   for entry in profiles.unpack()):
+                note = " — placeholder driver, restart ppd"
+        return active, note
+
+    def _refresh(self):
+        reading = self.sampler.sample()
+        self._updating = True
+        try:
+            self._apply(reading)
+        finally:
+            self._updating = False
+        return GLib.SOURCE_CONTINUE
+
+    def _apply(self, reading):
+        self.temp_graph.push(reading["temps"])
+        self.fan_graph.push(
+            {name: (float(rpm) if rpm is not None else None)
+             for name, rpm in reading["fans"].items()}
+        )
+
+        # CPU / memory / GPUs
+        cpu = reading["cpu_percent"]
+        mhz = reading["cpu_mhz"]
+        package = reading["temps"].get("CPU pkg")
+        parts = []
+        if cpu is not None:
+            parts.append(f"{cpu:.0f}%")
+            self.cpu_meter.set_value(cpu)
+        if mhz:
+            parts.append(f"{mhz:.0f} MHz")
+        if package:
+            parts.append(f"{package:.0f}°C")
+        self.cpu_value.set_text("   ".join(parts) or "--")
+
+        memory = reading["memory"]
+        if memory:
+            self.ram_value.set_text(
+                f"{memory['used_gib']:.1f} / {memory['total_gib']:.0f} GiB"
+            )
+            self.ram_meter.set_value(memory["percent"])
+            self.ram_row.set_subtitle(
+                f"zram {memory['zram_used_gib']:.2f} / {memory['zram_total_gib']:.0f} GiB"
+                " · no disk swap, so no hibernation"
+            )
+
+        self.igpu_value.set_text(
+            f"{reading['igpu_mhz']} MHz" if reading["igpu_mhz"] else "--"
+        )
+
+        dgpu = reading["dgpu"]
+        if dgpu is None:
+            self.dgpu_value.set_text("--")
+            self.dgpu_row.set_subtitle("no NVIDIA device")
+        elif "temp_c" in dgpu:
+            self.dgpu_value.set_text(
+                f"{dgpu['temp_c']:.0f}°C   {dgpu['util_percent']:.0f}%"
+                f"   {dgpu['power_w']:.0f} W"
+            )
+            self.dgpu_row.set_subtitle(f"awake · {dgpu['mem_used_mib']:.0f} MiB in use")
+        else:
+            self.dgpu_value.set_text(dgpu["status"])
+            self.dgpu_row.set_subtitle(
+                f"runtime-PM D3 for {dgpu['suspended_minutes']:.0f} min · not polled"
+                if dgpu["status"] == "suspended"
+                else "awake, but nothing is using it"
+            )
+
+        # Platform profile
+        choices = reading["platform_choices"]
+        if choices != self._profile_choices:
+            self._profile_choices = choices
+            model = Gtk.StringList()
+            for choice in choices:
+                model.append(choice)
+            self.profile_row.set_model(model)
+        self.profile_row.set_sensitive(bool(choices))
+        if not choices:
+            self.profile_row.set_subtitle(
+                "unavailable — acer_wmi needs predator_v4=1"
+            )
+        else:
+            unreachable = [c for c in choices if c not in PPD_FOR_PLATFORM]
+            self.profile_row.set_subtitle(
+                f"{len(choices)} states; {', '.join(unreachable)} are set directly"
+                if unreachable else f"{len(choices)} states"
+            )
+            current = reading["platform_profile"]
+            if current in choices and self.profile_row.get_selected() != choices.index(current):
+                self.profile_row.set_selected(choices.index(current))
+
+        active, note = self._ppd_state()
+        self.ppd_value.set_text(f"{active or '--'}{note}")
+
+        power = reading["power"]
+        source = "AC" if power["ac_online"] else "battery"
+        ports = power["usb_pd_ports"]
+        if ports:
+            source += f" · {ports} USB-C PD source" + ("" if ports == 1 else "s")
+        self.source_value.set_text(source)
+        self.dock_value.set_text(reading["dock"] or "no dock")
+
+        # Battery
+        battery = reading["battery"]
+        if battery is None:
+            self.cap_row.set_sensitive(False)
+            self.cap_row.set_subtitle("no battery present")
+            self.bat_value.set_text("--")
+            self.health_value.set_text("--")
+        else:
+            self.cap_row.set_sensitive(battery["cap"] is not None)
+            if battery["cap"] is None:
+                self.cap_row.set_subtitle("acer-wmi-battery not loaded")
+            else:
+                self.cap_row.set_active(battery["cap"] == 1)
+                self.cap_row.set_subtitle(
+                    "charging stops near 80%" if battery["cap"] == 1
+                    else "charges to 100% until the module is reloaded"
+                )
+            detail = [f"{battery['percent']}%", battery["status"]]
+            if battery["power_w"] > 0.05:
+                detail.append(f"{battery['power_w']:.1f} W")
+            self.bat_value.set_text("   ".join(detail))
+            health = []
+            if battery["health_percent"]:
+                health.append(f"{battery['health_percent']:.0f}% of design")
+            if battery["cycles"] is not None:
+                health.append(f"{battery['cycles']} cycles")
+            if battery["temp_c"]:
+                health.append(f"{battery['temp_c']:.1f}°C")
+            self.health_value.set_text(" · ".join(health) or "--")
+
+        # Keyboard
+        if reading["kbd_available"]:
+            self.kbd_row.set_sensitive(True)
+            mode = (reading["kbd_mode"] or "").split(",")
+            if len(mode) >= 3 and mode[2].isdigit():
+                self.kbd_row.set_active(int(mode[2]) > 0)
+            self.kbd_row.set_subtitle("four_zoned_kb, static white")
+        else:
+            self.kbd_row.set_sensitive(False)
+            self.kbd_row.set_subtitle(
+                "no four_zoned_kb — the in-tree acer_wmi cannot drive the "
+                "backlight; needs acer-wmi-linuwu (see README)"
+            )
+
+    # -- handlers ----------------------------------------------------------- #
+
+    def _on_wake_dgpu(self, _button):
+        live = self.sampler.wake_dgpu_and_read()
+        if live is None:
+            self._toast("nvidia-smi did not answer")
+        else:
+            self._toast(
+                f"dGPU {live['temp_c']:.0f}°C, {live['util_percent']:.0f}% busy, "
+                f"{live['power_w']:.0f} W"
+            )
+
+    def _on_profile_selected(self, row, _param):
+        if self._updating:
+            return
+        index = row.get_selected()
+        if index == Gtk.INVALID_LIST_POSITION or index >= len(self._profile_choices):
+            return
+        choice = self._profile_choices[index]
+        ppd_name = PPD_FOR_PLATFORM.get(choice)
+        if ppd_name:
+            # Through ppd, so it also applies its intel_pstate EPP.
+            try:
+                subprocess.run(["powerprofilesctl", "set", ppd_name],
+                               capture_output=True, text=True, timeout=8, check=True)
+                self._toast(f"Profile {choice} (ppd: {ppd_name})")
+            except (OSError, subprocess.SubprocessError) as error:
+                self._toast(f"powerprofilesctl failed: {error}")
+            return
+        ok, message = self._helper("profile", choice)
+        if not ok:
+            self._toast(message)
+            return
+        # ppd watches the sysfs file and will relabel itself, which otherwise
+        # looks like the panel and ppd disagreeing.
+        relabel = "power-saver" if choice == "quiet" else "balanced"
+        self._toast(f"Profile {choice} — ppd will now report {relabel}", timeout=7)
+
+    def _on_cap_toggled(self, row, _param):
+        if self._updating:
+            return
+        wanted = row.get_active()
+        ok, message = self._helper("cap", "on" if wanted else "off")
+        if ok:
+            self._toast(
+                "Charge cap on — charging stops near 80%" if wanted else
+                "Charge cap off. It comes back on the next acer_wmi_battery "
+                "load, because /etc/modprobe.d re-sends it.",
+                timeout=7,
+            )
+            return
+        self._toast(message, timeout=8)
+        # set_active() emits notify::active synchronously, so the guard has to
+        # be raised around it. Keep the helper call synchronous: if it ever
+        # becomes async, this and _refresh()'s own _updating window stop
+        # composing and both need rethinking.
+        self._updating = True
+        row.set_active(not wanted)
+        self._updating = False
+
+    def _on_kbd_toggled(self, row, _param):
+        if self._updating:
+            return
+        wanted = row.get_active()
+        ok, message = self._helper("kbd", "on" if wanted else "off")
+        if not ok:
+            self._toast(message, timeout=8)
+            self._updating = True
+            row.set_active(not wanted)
+            self._updating = False
+
+
+class TritonApp(Adw.Application):
+
+    def __init__(self):
+        super().__init__(application_id=APP_ID)
+
+    def do_activate(self):
+        window = self.props.active_window or TritonWindow(self)
+        window.present()
+
+
+if __name__ == "__main__":
+    raise SystemExit(TritonApp().run(None))

@@ -16,11 +16,19 @@ cachyPool/
 ├── cachyos-hyprland-setup.md      ← original install plan (now partially stale)
 ├── spected-installation.md        ← pre-install stack rationale
 ├── CLAUDE.md                      ← guidance for Claude Code working in this repo
+├── triton-panel/                  ← GTK4 panel for this laptop's own hardware (app + helper)
 └── configs/                       ← mirror of live dotfiles
     ├── hypr/                      ← hyprland.conf + modular sources + sibling daemons
     ├── waybar/                    ← config.jsonc + style.css
-    └── kitty/                     ← kitty.conf + Catppuccin-Mocha theme
+    ├── kitty/                     ← kitty.conf + Catppuccin-Mocha theme
+    └── applications/              ← .desktop entries for the Walker launcher
 ```
+
+Everything above is documentation or a dotfile mirror, with one exception:
+`triton-panel/` holds actual source — a small GTK4 application that reads this
+machine's Acer EC (fans, temperatures, the 5-state platform profile) and drives
+the two things that need root (the 80% charge cap and, when a driver for it
+exists, the keyboard backlight). It has its own README.
 
 ## Source-of-truth hierarchy
 

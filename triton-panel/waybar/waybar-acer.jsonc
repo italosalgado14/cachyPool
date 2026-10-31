@@ -1,0 +1,35 @@
+// Proposed additions to ~/.config/waybar/config.jsonc (mirrored in configs/waybar/).
+// Two new entries, no new packages: Waybar 0.15.0 already ships the
+// power-profiles-daemon module (man waybar-power-profiles-daemon).
+//
+// 1. Put the two modules in "modules-right", between "battery" and "cpu":
+//
+//      "modules-right": ["tray", "network", "bluetooth", "pulseaudio",
+//                        "battery", "power-profiles-daemon", "custom/acer",
+//                        "cpu", "memory"],
+//
+// 2. Add the two blocks below alongside the existing module definitions.
+
+  // Click cycles power-saver -> balanced -> performance. This only moves the
+  // hardware once power-profiles-daemon has a real platform driver: until
+  // `powerprofilesctl list` stops saying "PlatformDriver: placeholder" it is
+  // changing the intel_pstate EPP and nothing else.
+  "power-profiles-daemon": {
+    "format": "{icon} {profile}",
+    "tooltip-format": "Power profile: {profile}\nDriver: {driver}",
+    "format-icons": {
+      "default": "",
+      "performance": "",
+      "balanced": "",
+      "power-saver": ""
+    }
+  },
+
+  // Fan RPM + EC temps + platform profile + charge-cap state, from the acer_wmi
+  // hwmon. See the header of waybar-acer.sh for why the hwmonN index must not be
+  // hardcoded and why 0 RPM is a real reading, not an error.
+  "custom/acer": {
+    "exec": "$HOME/.config/hypr/scripts/waybar-acer.sh",
+    "return-type": "json",
+    "interval": 5
+  },

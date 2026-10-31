@@ -1,0 +1,7 @@
+/* Proposed additions to ~/.config/waybar/style.css (mirrored in configs/waybar/).
+   The classes come from waybar-acer.sh: idle = fans stopped, active = spinning,
+   high = >= 4000 RPM, unavailable = no acer_wmi hwmon (predator_v4 not set). */
+
+#custom-acer.idle        { opacity: 0.55; }
+#custom-acer.high        { color: #f38ba8; }
+#custom-acer.unavailable { color: #6c7086; }

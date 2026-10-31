@@ -1,0 +1,3 @@
+# Python bytecode from triton-panel (the app is a single script; this is build output)
+__pycache__/
+*.pyc

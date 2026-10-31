@@ -1943,6 +1943,67 @@ Everything the parameter adds disappears; hotkeys, rfkill and the battery cap ar
 
 ---
 
+## 18. `triton-panel` — a GUI for this machine's own hardware — ✅ APPLIED 2026-10-31 (sudoers rule pending)
+
+**Why:** everything §14 and §17 unlocked was reachable only by `cat`-ing sysfs. No general-purpose tool covers it — `mission-center` shows no fans, `coolercontrol` is a fan *control* front end for hardware that has no PWM here, `psensor` graphs RPM but cannot touch the charge cap or the platform profile, and `powerprofilesctl` reaches three of the five states.
+
+`triton-panel/` in this repo is a small GTK4/libadwaita app: temperature and fan graphs, CPU/memory/iGPU/dGPU, power source and dock, battery health, the five-state profile selector, the 80% cap as a switch, and a keyboard-backlight row. It is launched from Walker and depends on nothing that is not already installed (`gtk4`, `libadwaita`, `python-gobject`, `python-cairo` were all present).
+
+### 18a. Install
+
+```bash
+cd ~/code/cachyPool/triton-panel
+install -Dm755 triton-panel ~/.local/bin/triton-panel
+install -Dm644 triton-panel.desktop ~/.local/share/applications/triton-panel.desktop
+
+# the privileged helper -- MUST be root-owned, see 18b
+sudo install -Dm755 -o root -g root triton-ctl /usr/local/bin/triton-ctl
+sudo visudo -cf triton-panel.sudoers      # validate FIRST, always
+sudo install -Dm440 -o root -g root triton-panel.sudoers /etc/sudoers.d/triton-panel
+
+# float + centre the window
+cp ~/code/cachyPool/configs/hypr/windowrules.conf ~/.config/hypr/windowrules.conf
+hyprctl reload
+```
+
+⚠ Writing a sourced Hyprland `.conf` auto-reloads Hyprland, which snaps the screens back to `monitors.conf` geometry — re-apply the current monitor profile afterwards (`Super+M` or `monitor-mode.sh <mode>`).
+
+### 18b. Privileges
+
+The app runs entirely unprivileged; every number it shows is a world-readable sysfs file. Only three nodes are root-write (the charge cap, `platform_profile`, and the keyboard backlight), and those go through `triton-ctl`: no path arguments, no `eval`, every accepted value matched against a literal in a `case` statement.
+
+**A NOPASSWD sudoers rule pointing at a file the invoking user can write *is* root.** `triton-ctl` therefore refuses to start unless root owns it — but install it correctly anyway, exactly as above.
+
+**State as of 2026-10-31:** the app, the `.desktop` and `/usr/local/bin/triton-ctl` (root-owned, verified) are all installed. **Only the sudoers rule is outstanding** — do not reinstall the helper, just run its two lines. Until then the cap switch and the `quiet`/`balanced-performance` entries raise a toast; everything else works.
+
+### 18c. Verify
+
+```bash
+triton-panel &                       # fans, temps and the profile selector must be populated
+# Walker: Super+Space, type "triton"
+```
+
+If the fan and profile groups read "unavailable", §17 is not in effect. If the cap switch raises a toast about sudoers, the two `sudo` lines in 18a were skipped.
+
+### 18d. Revert
+
+```bash
+rm ~/.local/bin/triton-panel ~/.local/share/applications/triton-panel.desktop
+sudo rm /usr/local/bin/triton-ctl /etc/sudoers.d/triton-panel
+```
+
+Then drop the `dev.isalgado.TritonPanel` block from `windowrules.conf`.
+
+### 18e. Docs updated 2026-10-31
+
+- `triton-panel/README.md`: the full reference — install, privileges, design notes, troubleshooting, and the keyboard-backlight caveat.
+- `README.md`: repo index gains `triton-panel/` and the note that it is the one directory holding source rather than docs or mirrors.
+- `ACTUAL-CONFIGURATION.md`: §15 new row, §16 repo layout.
+- `configs/applications/triton-panel.desktop`, `configs/hypr/windowrules.conf`: new mirror and new rule block.
+- `triton-panel/waybar/`: optional Waybar modules showing the same data in the bar. **Not applied** — the live Waybar config is untouched; see that directory's README.
+
+---
+
 ## Order of operations summary
 
 | Priority | Section | Reboot needed? |
@@ -1964,6 +2025,7 @@ Everything the parameter adds disappears; hotkeys, rfkill and the battery cap ar
 | ✅ Done 2026-10-12 | 15. logind: ignore lid close on external power (written 2026-07-12, installed 2026-10-12) | No |
 | ✅ Done 2026-10-16 | 16. Visual monitor layouts: Hyprmon editor + Monitors menu | No |
 | ✅ Done 2026-10-31 | 17. Force `predator_v4` → fan RPM + 5-state `platform_profile` | Live: No · **Confirm on the next boot** |
+| ✅ Done 2026-10-31 | 18. `triton-panel` GUI (depends on 17) | No |
 
 ---
 

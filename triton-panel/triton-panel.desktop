@@ -1,0 +1,20 @@
+# Installed to ~/.local/share/applications/triton-panel.desktop
+# Adds a "Triton Panel" entry to the Walker launcher (Elephant
+# desktopapplications provider). Mirrored in the repo at
+# configs/applications/triton-panel.desktop, while the application itself lives
+# in triton-panel/ and is installed to ~/.local/bin/triton-panel.
+#
+# StartupWMClass must match the GTK application id, or Hyprland's windowrules
+# for this class never fire and the panel opens tiled.
+[Desktop Entry]
+Type=Application
+Name=Triton Panel
+GenericName=Hardware monitor and controls
+Comment=Fans, EC temperatures, platform profile, 80% charge cap, keyboard backlight
+Exec=/home/isalgado/.local/bin/triton-panel
+Icon=utilities-system-monitor
+Terminal=false
+StartupNotify=true
+StartupWMClass=dev.isalgado.TritonPanel
+Categories=Settings;HardwareSettings;
+Keywords=triton;acer;predator;fans;rpm;temperature;temps;battery;cap;charge;profile;keyboard;backlight;sensors;hardware;
