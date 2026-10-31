@@ -162,7 +162,7 @@ The compositor is **dwindle**: every new window splits the focused space in half
 - Or just walk away — Hypridle handles it:
   - 5 min idle → lock screen
   - 10 min idle → monitors sleep (DPMS off)
-  - 20 min idle → system suspend — **only on battery** (since 2026-07-12; on AC/USB-C power the machine stays awake because resume from long s2idle can crash the NVIDIA driver)
+  - 20 min idle → system suspend — **only on battery** (since 2026-07-12; on AC/USB-C power the machine stays awake because resume from long s2idle can crash the NVIDIA driver). Dormant while the battery was out; armed again on **2026-10-31**
 
 ### G. "Bluetooth headphones / mouse"
 

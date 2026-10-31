@@ -1572,7 +1572,7 @@ Leave `vlc-plugins-all` — it predates this install and `phonon-qt6-vlc` (KDE's
 
 ---
 
-## 14. Battery charge cap at 80% (acer-wmi-battery) — ✅ INSTALLED 2026-10-12, cap waits for the replacement battery
+## 14. Battery charge cap at 80% (acer-wmi-battery) — ✅ VERIFIED WORKING 2026-10-31 (installed 2026-10-12)
 
 **Why:** the original battery failed and was physically removed on 2026-10-12. A replacement is on order and should arrive within a few weeks. The likely cause is months spent docked at 100%, made worse by a gaming laptop's heat. Capping the charge at 80% is the standard mitigation, and it should already be in place when the new pack goes in.
 
@@ -1620,7 +1620,7 @@ journalctl -k -b | grep acer_wmi_battery                  # "available modes: he
 systemctl is-failed systemd-modules-load.service          # must print "active", not "failed"
 ```
 
-⚠ **No battery fitted means no real proof yet.** Until the replacement arrives, the only possible checks are that the module loads and that the firmware reads back `health_mode = 1`. The real test comes once the new pack is in: charging must stop near 80% instead of climbing to 100%.
+The real test is not any of the above: it is **charging stopping near 80% instead of climbing to 100%**. That test was finally run on 2026-10-31 and it passed — see "Results 2026-10-31" below. The 2026-10-12 results are kept because they explain what a `health_mode = 0` with no pack looks like.
 
 ```bash
 upower -i $(upower -e | grep BAT)
@@ -1641,15 +1641,33 @@ upower -i $(upower -e | grep BAT)
 
 **Reading the `0`:** the set call succeeded at the ACPI level, because otherwise init returns `-EIO` and the module would not be loaded. Yet the firmware's own status read right after it reports health mode off. The driver ignores the firmware's return code, so a silent refusal looks exactly like this. The likely reason is that there is no pack for the EC to apply the cap to. That is not proven: it could also mean this firmware ignores the command. The successful load without a battery does settle one worry: boot will not fail `systemd-modules-load.service`.
 
-**When the replacement is fitted:** install it with the laptop off and boot normally, so the module re-sends the cap when it loads. Then:
+**Results 2026-10-31: the cap works. ✅**
+
+The replacement pack (Getac `AP20BHU`, serial `41378`, `cycle_count` 0) was fitted with the laptop off and the machine booted normally, so the module re-sent the cap as it loaded.
+
+| Check | Result |
+|---|---|
+| `health_mode` | **`1`** |
+| Kernel log | `acer_wmi_battery: active modes: health mode` — the line that was missing on the two pack-less boots |
+| `temperature` | `27900` → 27.9 °C, readable now that there is a pack |
+| **Charge stop** | the pack charged from 74% and **stopped at exactly 80%** |
+| `BAT1/status` | `Not charging`, with `ACAD/online` = `1` |
+| `charge_now` | identical at 11:37 and 11:43 — six minutes, not a pause |
+| `current_now` | `0` |
+| `upower` | `state: pending-charge`, `energy-rate: 0 W` |
+| Pack health | `energy_full` 101.67 Wh vs 99.99 Wh design — factory variance on a 0-cycle pack, not cap-induced drift |
+
+**Nothing else on this machine could have stopped it.** TLP is not installed. BAT1 exposes **no** `charge_control_*` or `charge_behaviour` node at all, because the in-kernel `acer_wmi` has no charge-limit code. The only limiter present is `health_mode`. So the `0` seen on 2026-10-12 was exactly what it looked like: no pack for the EC to apply the setting to, not a firmware refusal. The `linuwu-sense` fallback named above is **no longer needed**.
+
+Re-run the check any time with:
 
 ```bash
-cat /sys/bus/wmi/drivers/acer-wmi-battery/health_mode     # want 1
-journalctl -k -b | grep acer_wmi_battery                  # want "active modes: health mode"
-upower -i $(upower -e | grep BAT)                         # charging should stop near 80%
+cat /sys/bus/wmi/drivers/acer-wmi-battery/health_mode     # 1
+cat /sys/class/power_supply/BAT1/status                   # "Not charging" at 80% on AC
+upower -i $(upower -e | grep BAT)                         # state: pending-charge, 0 W
 ```
 
-If it still reads `0` with a pack fitted, set it by hand once with `echo 1 | sudo tee /sys/bus/wmi/drivers/acer-wmi-battery/health_mode`. If that also reads back `0`, this firmware does not honour the Care Center interface. The fallback is then `linuwu-sense`, which drives a different interface, the PredatorSense one (see "Rejected alternative" above).
+**Lifting the cap for travel is not persistent, by design.** `/etc/modprobe.d/acer-wmi-battery.conf` re-sends `enable_health_mode=1` on every module load, so an `echo 0` survives only until the next load or reboot. That is deliberate: forgetting to re-arm the cap is what killed the first pack. `triton-panel` exposes the same toggle as a switch and says so in the toast.
 
 ### 14c. Calibration mode: leave it alone
 
@@ -1664,7 +1682,15 @@ sudo modprobe -r acer_wmi_battery
 paru -Rns acer-wmi-battery-dkms                                        # takes dkms with it if nothing else needs it
 ```
 
-### 14e. Docs updated 2026-10-12
+### 14e. Docs updated
+
+**2026-10-31** (cap verified)
+
+- `ACTUAL-CONFIGURATION.md`: header, §1 battery row, §8 `acer-wmi-battery-dkms` row, §15 battery row moved to ✅ with the evidence, §15 hypridle row annotated (battery-only suspend armed again).
+- `CLAUDE.md`: battery bullet rewritten.
+- `shortcuts.md`: §7 lid-close note and the hypridle suspend bullet — both paths are live again now that there is a pack.
+
+**2026-10-12** (installed)
 
 - `ACTUAL-CONFIGURATION.md`: §1 battery row, §8 rows for `acer-wmi-battery-dkms` and `dkms`, §9 counts, §15 new row, §16 repo layout gained `configs/modprobe.d/`.
 - `configs/modprobe.d/acer-wmi-battery.conf`: new mirror of `/etc/modprobe.d/acer-wmi-battery.conf`. Restore path on a rebuild is the `sudo install` line in §14a.
@@ -1832,6 +1858,91 @@ rm ~/.local/share/applications/{hyprmon,monitors}.desktop
 
 ---
 
+## 17. Fan RPM and the platform profile: force `predator_v4` — ✅ APPLIED 2026-10-31 (reboot check pending)
+
+**Why:** this laptop had no fan readings and no `/sys/firmware/acpi/platform_profile` at all. Not a missing package — the in-kernel `acer_wmi` (7.2.8) simply selects no quirk on this model.
+
+The driver carries `module_param(predator_v4, bool, 0444)`, and `find_quirks()` does:
+
+```c
+if (predator_v4)
+        quirks = &quirk_acer_predator_v4;   /* .hwmon = true, .platform_profile = true */
+else if (!force_series)
+        dmi_check_system(acer_quirks);
+```
+
+Its DMI quirk table lists only `Predator PHN16-71`, `PH16-71` and `PH18-71`. The **PT516-52s is absent**, so the DMI path finds nothing and the driver falls back to `quirk_unknown`. Forcing the parameter skips the DMI match entirely.
+
+**What it gives, verified live on 2026-10-31 with a real unload/reload (confirmed in `dmesg`):**
+
+| | |
+|---|---|
+| `/sys/firmware/acpi/platform_profile` | appears, with five states: `low-power quiet balanced balanced-performance performance` |
+| `/sys/class/hwmon/hwmonN` (`name` = `acer`) | `fan1_input`, `fan2_input`, `temp1_input`, `temp3_input` (`temp2_input` is wired but always reads 0) |
+| lm_sensors chip name | `acer-isa-0ace` |
+| Load test | 0/0 RPM at 41 °C → 20 threads for 45 s → **2564/2307 RPM at 56 °C** → back to 2097/2027 |
+| Survived the reload | `Acer WMI hotkeys` input device, the `acer-*` rfkill switches, and `health_mode` = 1 |
+
+**0 RPM at idle is a real reading**, not a failure: this laptop stops both fans when it is cool.
+
+**What it does NOT give:**
+
+- **No fan control.** `quirk_acer_predator_v4` sets `.hwmon` but not `.pwm`, so the fans are readable and nothing more.
+- **No keyboard RGB.** The in-tree `acer_wmi` never exposes `four_zoned_kb`. That needs an out-of-tree driver — the route, and why it is uncertain on this 3-zone keyboard, is in `triton-panel/README.md`.
+
+### 17a. Install
+
+The parameter is `0444`: settable only at module load, never writable through sysfs. So it has to be a modprobe drop-in.
+
+```bash
+sudo install -Dm644 ~/code/cachyPool/configs/modprobe.d/acer-wmi-predator-v4.conf \
+     /etc/modprobe.d/acer-wmi-predator-v4.conf
+sudo systemctl restart power-profiles-daemon
+```
+
+- **No initramfs rebuild.** `acer_wmi` appears in no mkinitcpio `MODULES` list; the only `MODULES+=` on this machine is the NVIDIA one in `/etc/mkinitcpio.conf.d/10-chwd.conf`.
+- **The `power-profiles-daemon` restart is required, not optional.** ppd probes platform drivers once at startup. Until it is restarted it keeps reporting `PlatformDriver: placeholder`, and switching profiles moves the `intel_pstate` EPP and nothing thermal.
+
+### 17b. Verify
+
+```bash
+cat /sys/module/acer_wmi/parameters/predator_v4   # Y
+cat /sys/firmware/acpi/platform_profile           # must exist
+cat /sys/firmware/acpi/platform_profile_choices   # 5 states
+sensors acer-isa-0ace                             # fan1/fan2 + temp1/temp3
+powerprofilesctl list                             # no "placeholder" left
+```
+
+⚠ **The parameter reads `Y` after a live reload too, so the only honest test is a reboot.** Run the five commands above after the next boot; if `predator_v4` reads `N`, the drop-in is not being picked up.
+
+**Mapping ppd onto the five states.** ppd has only three targets, so `quiet` and `balanced-performance` are unreachable through it. Expected, to be confirmed after the restart:
+
+```bash
+powerprofilesctl set power-saver && cat /sys/firmware/acpi/platform_profile   # expect low-power
+powerprofilesctl set balanced    && cat /sys/firmware/acpi/platform_profile   # expect balanced
+powerprofilesctl set performance && cat /sys/firmware/acpi/platform_profile   # expect performance
+```
+
+To use the other two, write the file directly (`triton-panel` does this through its helper). Note that ppd **monitors** that sysfs file, so a direct write makes ppd relabel its own active profile — `quiet` reads back as `power-saver`, `balanced-performance` as `balanced`. That is ppd behaving correctly, not a conflict.
+
+### 17c. Revert
+
+```bash
+sudo rm /etc/modprobe.d/acer-wmi-predator-v4.conf
+sudo modprobe -r acer_wmi && sudo modprobe acer_wmi
+sudo systemctl restart power-profiles-daemon
+```
+
+Everything the parameter adds disappears; hotkeys, rfkill and the battery cap are untouched, since the cap lives in the separate `acer_wmi_battery` module.
+
+### 17d. Docs updated 2026-10-31
+
+- `configs/modprobe.d/acer-wmi-predator-v4.conf`: new mirror of the live drop-in.
+- `ACTUAL-CONFIGURATION.md`: header, §15 new row, §16 repo layout.
+- `CLAUDE.md`: new hardware-constraints bullet.
+
+---
+
 ## Order of operations summary
 
 | Priority | Section | Reboot needed? |
@@ -1849,9 +1960,10 @@ rm ~/.local/share/applications/{hyprmon,monitors}.desktop
 | ⚠ Recommended | 11. Force `s2idle` (NVIDIA resume black-screen) | Live: No · Persist: YES |
 | 🔥 Do first | 12. Firefox-freeze fix: VA-API → iGPU, hardware decode paused | YES — reboot also clears the wedged i915 |
 | ✅ Done 2026-07-31 | 13. Install VLC (+ disable its hardware decode, per §12) | No |
-| ✅ Installed 2026-10-12 (cap needs the new battery) | 14. Battery charge cap at 80% (`acer-wmi-battery-dkms`) | No |
+| ✅ Verified 2026-10-31 | 14. Battery charge cap at 80% (`acer-wmi-battery-dkms`) — charging stops at 80%, proven | No |
 | ✅ Done 2026-10-12 | 15. logind: ignore lid close on external power (written 2026-07-12, installed 2026-10-12) | No |
 | ✅ Done 2026-10-16 | 16. Visual monitor layouts: Hyprmon editor + Monitors menu | No |
+| ✅ Done 2026-10-31 | 17. Force `predator_v4` → fan RPM + 5-state `platform_profile` | Live: No · **Confirm on the next boot** |
 
 ---
 
