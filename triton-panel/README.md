@@ -32,6 +32,8 @@ general-purpose monitor reads it:
 * **Battery** — the 80% charge cap as a switch, plus charge, status, draw,
   health against design capacity, cycle count, and pack temperature.
 * **Keyboard** — backlight on/off (see the caveat below).
+* **Fingerprint** — the reader, what is enrolled, enrolling and deleting, and
+  whether hyprlock unlocks with it.
 
 ## Automatic power saving
 
@@ -63,6 +65,45 @@ Two things about this are worth knowing before editing either side:
 
 Turning the switch **off** restores 240 Hz and then leaves the rate alone; it
 deliberately does *not* undo the platform profile you are currently sitting on.
+
+## Fingerprint
+
+Everything fingerprint in one group: the sensor (name, scan type, enroll
+stages), the enrolled fingers, a picker + **Enroll**, **Delete all prints**, an
+**Unlock hyprlock with fingerprint** switch, and a read-only `sudo` row.
+
+Why it needs no privileges of its own: polkit here grants
+`net.reactivated.fprint.device.verify` to the active session outright, so
+listing never prompts, and `…device.enroll` is `auth_self_keep`, so `Claim()`
+raises a dialog for your *own* password. `/var/lib/fprint` is root-only, so
+nothing is read from the filesystem — it is all D-Bus.
+
+Three invariants to keep if you edit this:
+
+1. **Claim → EnrollStart → EnrollStop → Release on every path out**, errors and
+   `close-request` included. A claim left behind means the next `Super+L` has
+   no fingerprint until fprintd times it out.
+2. **Never poll the fingerprint group from the 2 s loop.** Enrolled prints
+   change only when this panel changes them, and a timed `ListEnrolledFingers`
+   would race the `EnrollStatus` signals. `_refresh_fingerprint()` runs at
+   startup and after enroll/delete, and no-ops while `_enrolling`.
+3. **`ListEnrolledFingers` raises when nothing is enrolled** rather than
+   returning an empty list. Only that one error means "none"; everything else
+   is a real failure and is shown as one.
+
+The **unlock switch** writes a marker-delimited block in
+`~/.config/hypr/hyprlock.conf`. That file is *not* sourced by `hyprland.conf`,
+so writing it does not trigger Hyprland's auto-reload; hyprlock reads it at the
+next lock. No PAM file is touched anywhere — hyprlock 0.9.6 drives fprintd over
+D-Bus itself. The switch refuses to enable with zero fingers enrolled, and
+refuses to write at all if `hyprlock.conf` already has its own `auth` block.
+
+⚠ It writes the **live** file, so `configs/hypr/hyprlock.conf` in the repo then
+differs and has to be pulled back by hand.
+
+The `sudo` row is **read-only** by design. `chwd` already put
+`auth sufficient pam_fprintd.so` in `/etc/pam.d/sudo`; a broken edit there costs
+you sudo entirely, so the panel reports it and nothing more.
 
 ## Also here
 

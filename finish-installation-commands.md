@@ -2116,6 +2116,116 @@ this section.
 
 ---
 
+## 20. Fingerprint: enrol and unlock from Triton Panel — ✅ APPLIED 2026-10-31 (enrolment pending)
+
+The machine has an **ELAN `04f3:0c4f`** reader. `fprintd 1.94.5` + `libfprint
+1.94.100` were already installed and the `elanmoc` driver already binds it:
+`fprintd-list` answers *"ElanTech Fingerprint Sensor"*. Nothing worked only
+because **no finger was ever enrolled**.
+
+### 20a. What already existed
+
+* **`sudo` was already wired.** CachyOS's `chwd` had put
+  `auth sufficient pam_fprintd.so # chwd-fprintd` in `/etc/pam.d/sudo`. It
+  starts working the moment a finger is enrolled; the panel reports its state
+  but **never edits it** — that is the lockout-class file.
+* **No PAM change is needed for the lock screen.** hyprlock 0.9.6 drives
+  fprintd **over D-Bus itself** (`auth:fingerprint:*` config keys, strings
+  `fprint: started verifying` in the binary). So unlocking by fingerprint
+  carries none of the risk a `/etc/pam.d/hyprlock` edit would.
+* **There is nothing else to unlock.** This machine boots via `getty@tty1`
+  autologin with no display manager and no login prompt, so hyprlock
+  (`Super+L`, and hypridle at 5 min) is the only gate.
+
+### 20b. polkit, and why the panel can do this unprivileged
+
+From `net.reactivated.fprint.device.policy` on this machine:
+
+| action | `allow_active` | consequence |
+|---|---|---|
+| `…device.verify` | `yes` | listing enrolled fingers needs **no** prompt |
+| `…device.enroll` | `auth_self_keep` | `Claim()` raises a polkit dialog for your **own** password |
+| `…device.setusername` | `auth_admin_keep` | never used — the panel only ever touches the current user |
+
+`/var/lib/fprint` is `drwx------ root root`, so enrolled prints **cannot** be
+read from the filesystem as the user. Everything goes through D-Bus.
+
+### 20c. The panel's Fingerprint group
+
+Sensor (name · scan type · enroll stages), what is enrolled, a finger picker
+with **Enroll**, **Delete all prints**, an **Unlock hyprlock with fingerprint**
+switch, and a read-only `sudo` row.
+
+Three rules it enforces:
+
+1. **Claim → EnrollStart → EnrollStop → Release, on every path out**, including
+   errors and closing the window mid-enrolment (`close-request`). A claim left
+   behind means the next `Super+L` has no fingerprint until fprintd times it
+   out.
+2. **The switch refuses to enable with zero fingers enrolled**, which would
+   otherwise give a lock screen asking for a finger it can never match.
+   Deleting the last print also switches it back off.
+3. **It refuses to touch `hyprlock.conf` if that file already has its own
+   `auth` block**, rather than produce a config with two.
+
+Not polled on the 2 s tick: enrolled prints change only when the panel changes
+them, and a timed `ListEnrolledFingers` would race the `EnrollStatus` signals.
+
+### 20d. The hyprlock block
+
+`hyprlock.conf` is **not** in `hyprland.conf`'s `source` list, so writing it does
+**not** trigger Hyprland's auto-reload (which would snap the monitors to the
+`monitors.conf` boot geometry). hyprlock reads it at launch, so a change applies
+at the next lock. The panel owns a marker-delimited block and writes it
+atomically:
+
+```
+# >>> triton-panel: fingerprint unlock >>>
+auth {
+    fingerprint {
+        enabled = true
+        ready_message = (Swipe finger to unlock)
+        present_message = Scanning fingerprint
+        retry_delay = 250
+    }
+}
+# <<< triton-panel: fingerprint unlock <<<
+```
+
+`ready_message`'s verb comes from the device's reported `scan-type`, which is
+**`swipe`** on this ElanTech sensor, not `press`.
+
+⚠ The panel writes the **live** file. `configs/hypr/hyprlock.conf` then differs
+and must be pulled back into the repo by hand — the panel says so in a toast.
+
+### 20e. Verify — results 2026-10-31
+
+| check | result |
+|---|---|
+| reader detected | ElanTech Fingerprint Sensor · `swipe` · **6** enroll stages |
+| `ListEnrolledFingers` with nothing enrolled | fprintd **raises** rather than returning `[]`; translated to "none", every other error reported as a real failure |
+| group renders | all six rows; switch **insensitive** with "Enroll a finger first" |
+| no claim leaked | after each panel run the device still answers — a leak would fail with "already claimed" |
+| block write | enable → disable → enable is idempotent (exactly one marker block); disable removes it cleanly |
+| hand-written `auth` block present | refused with "edit it by hand" |
+
+⚠ **Enrolment itself is untested** — it needs a real finger on the sensor six
+times. Run **`fprintd-enroll`** or press **Enroll** in the panel, then turn the
+switch on.
+
+### 20f. Revert
+
+Turn the switch off (removes the block), then `fprintd-delete $USER`. To drop
+fingerprint `sudo` as well, remove the `pam_fprintd` line chwd put in
+`/etc/pam.d/sudo` — validate with care, that file is lockout-class.
+
+### 20g. Docs updated 2026-10-31
+
+`ACTUAL-CONFIGURATION.md` §15 new row; `CLAUDE.md`; `triton-panel/README.md`;
+this section.
+
+---
+
 ## Order of operations summary
 
 | Priority | Section | Reboot needed? |
@@ -2139,6 +2249,7 @@ this section.
 | ✅ Done 2026-10-31 | 17. Force `predator_v4` → fan RPM + 5-state `platform_profile` | Live: No · **Confirm on the next boot** |
 | ✅ Done 2026-10-31 | 18. `triton-panel` GUI (depends on 17) | No |
 | ✅ Done 2026-10-31 | 19. Automatic power saving by power source (60 Hz + power-saver on battery) | No |
+| ✅ Done 2026-10-31 | 20. Fingerprint: enrol + hyprlock unlock from Triton Panel (enrolment pending) | No |
 
 ---
 

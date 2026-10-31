@@ -48,6 +48,7 @@ Deliberate design choices worth keeping:
 
 import os
 import glob
+import pathlib
 import math
 import signal
 import subprocess
@@ -88,6 +89,38 @@ POWER_STATE = os.path.join(
     os.environ.get("XDG_RUNTIME_DIR") or "/tmp", "triton-power-mode",
 )
 
+# Fingerprint. fprintd is a system D-Bus service; everything here goes through
+# it, because /var/lib/fprint is root-only (drwx------) and the enrolled prints
+# cannot be read from the filesystem as the user.
+#
+# polkit (net.reactivated.fprint.device.policy on this machine):
+#   verify      allow_active = yes             -> listing needs no prompt
+#   enroll      allow_active = auth_self_keep  -> Claim() raises a polkit dialog
+#   setusername auth_admin_keep                -> never used; we only ever touch
+#                                                 the current user
+FPRINT_NAME = "net.reactivated.Fprint"
+FPRINT_MANAGER = "/net/reactivated/Fprint/Manager"
+HYPRLOCK_CONF = os.path.expanduser("~/.config/hypr/hyprlock.conf")
+SUDO_PAM = "/etc/pam.d/sudo"
+
+# The ten names fprintd accepts, with the labels shown in the picker.
+FINGERS = [
+    ("right-index-finger", "Right index"), ("right-thumb", "Right thumb"),
+    ("right-middle-finger", "Right middle"), ("right-ring-finger", "Right ring"),
+    ("right-little-finger", "Right little"), ("left-index-finger", "Left index"),
+    ("left-thumb", "Left thumb"), ("left-middle-finger", "Left middle"),
+    ("left-ring-finger", "Left ring"), ("left-little-finger", "Left little"),
+]
+
+# The block the panel owns inside hyprlock.conf. Marker-delimited so it can be
+# rewritten or removed without touching anything hand-written around it.
+# hyprlock.conf is NOT in hyprland.conf's `source` list, so writing it does not
+# trigger Hyprland's auto-reload (which would snap the monitors to the
+# monitors.conf boot geometry). It is read by hyprlock at launch, so a change
+# takes effect at the next lock.
+HYPRLOCK_BEGIN = "# >>> triton-panel: fingerprint unlock >>>"
+HYPRLOCK_END = "# <<< triton-panel: fingerprint unlock <<<"
+
 ACER_PLATFORM = "/sys/devices/platform/acer-wmi"
 PLATFORM_PROFILE = "/sys/firmware/acpi/platform_profile"
 PLATFORM_CHOICES = "/sys/firmware/acpi/platform_profile_choices"
@@ -105,6 +138,130 @@ PPD_FOR_PLATFORM = {
     "balanced": "balanced",
     "performance": "performance",
 }
+
+
+# --------------------------------------------------------------------------- #
+# Fingerprint: fprintd over system D-Bus, and the hyprlock config block
+# --------------------------------------------------------------------------- #
+
+def fprint_device():
+    """(device proxy, info dict) for the default reader, or (None, None).
+
+    Kept out of the 2 s poll loop on purpose: enrolled prints change only when
+    this panel changes them, and ListEnrolledFingers during an enrollment would
+    race the EnrollStatus signals.
+    """
+    try:
+        manager = Gio.DBusProxy.new_for_bus_sync(
+            Gio.BusType.SYSTEM, Gio.DBusProxyFlags.NONE, None,
+            FPRINT_NAME, FPRINT_MANAGER, FPRINT_NAME + ".Manager", None,
+        )
+        path = manager.call_sync("GetDefaultDevice", None,
+                                 Gio.DBusCallFlags.NONE, 5000, None).unpack()[0]
+        device = Gio.DBusProxy.new_for_bus_sync(
+            Gio.BusType.SYSTEM, Gio.DBusProxyFlags.NONE, None,
+            FPRINT_NAME, path, FPRINT_NAME + ".Device", None,
+        )
+    except GLib.Error:
+        return None, None
+
+    def prop(name, default=None):
+        value = device.get_cached_property(name)
+        return value.unpack() if value is not None else default
+
+    return device, {
+        "name": prop("name", "fingerprint reader"),
+        "stages": prop("num-enroll-stages", 0) or 0,
+        # "swipe" on the ElanTech sensor here; "press" on most others. The UI
+        # verb comes from this rather than being hardcoded.
+        "scan_type": prop("scan-type", "press"),
+    }
+
+
+def fprint_list(device, username):
+    """(fingers, error). fprintd RAISES when nothing is enrolled rather than
+    returning an empty list, so that one error is translated to "none" and
+    every other error is reported as a real failure."""
+    try:
+        return list(device.call_sync("ListEnrolledFingers", GLib.Variant("(s)", (username,)),
+                                     Gio.DBusCallFlags.NONE, 5000, None).unpack()[0]), None
+    except GLib.Error as error:
+        text = error.message or ""
+        if "NoEnrolledPrints" in text or "discover prints" in text:
+            return [], None
+        return [], text
+
+
+def hyprlock_block_state():
+    """(enabled, conflict). `conflict` is set when hyprlock.conf already carries
+    an auth block the panel did not write -- it then refuses to touch the file
+    rather than produce a config with two `auth {` blocks."""
+    try:
+        text = pathlib.Path(HYPRLOCK_CONF).read_text()
+    except OSError:
+        return False, None
+    outside = text
+    if HYPRLOCK_BEGIN in text and HYPRLOCK_END in text:
+        i, j = text.index(HYPRLOCK_BEGIN), text.index(HYPRLOCK_END) + len(HYPRLOCK_END)
+        outside = text[:i] + text[j:]
+        managed = text[i:j]
+    else:
+        managed = ""
+    for line in outside.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("auth") and ("{" in stripped or stripped.startswith("auth:")):
+            return False, "hyprlock.conf already has its own auth block -- edit it by hand"
+    return ("enabled = true" in managed), None
+
+
+def hyprlock_set(enabled, scan_type):
+    """Add, update or remove the managed block. Atomic (tmp + rename)."""
+    path = pathlib.Path(HYPRLOCK_CONF)
+    try:
+        text = path.read_text()
+    except OSError as error:
+        return str(error)
+    if HYPRLOCK_BEGIN in text and HYPRLOCK_END in text:
+        i, j = text.index(HYPRLOCK_BEGIN), text.index(HYPRLOCK_END) + len(HYPRLOCK_END)
+        text = text[:i].rstrip("\n") + text[j:]
+        text = text.rstrip("\n") + "\n"
+    if enabled:
+        verb = "Swipe" if scan_type == "swipe" else "Scan"
+        text = text.rstrip("\n") + f"""
+
+{HYPRLOCK_BEGIN}
+# Written by Triton Panel. hyprlock talks to fprintd over D-Bus directly -- this
+# needs no PAM change, which is why unlocking by fingerprint carries none of the
+# lockout risk a /etc/pam.d edit would. Password auth stays on regardless.
+auth {{
+    fingerprint {{
+        enabled = true
+        ready_message = ({verb} finger to unlock)
+        present_message = Scanning fingerprint
+        retry_delay = 250
+    }}
+}}
+{HYPRLOCK_END}
+"""
+    tmp = path.with_suffix(".conf.triton-tmp")
+    try:
+        tmp.write_text(text)
+        tmp.replace(path)
+    except OSError as error:
+        try:
+            tmp.unlink()
+        except OSError:
+            pass
+        return str(error)
+    return None
+
+
+def sudo_has_fprintd():
+    try:
+        return any(l.strip().startswith("auth") and "pam_fprintd" in l
+                   for l in pathlib.Path(SUDO_PAM).read_text().splitlines())
+    except OSError:
+        return None
 
 
 # --------------------------------------------------------------------------- #
@@ -599,6 +756,9 @@ class TritonWindow(Adw.ApplicationWindow):
         self._build_ui()
         self._refresh()
         GLib.timeout_add_seconds(POLL_SECONDS, self._refresh)
+        # Closing the window mid-enrollment must not leave fprintd claimed:
+        # the next Super+L would have no fingerprint until the claim times out.
+        self.connect("close-request", self._on_close)
 
     # -- infrastructure ----------------------------------------------------- #
 
@@ -612,6 +772,14 @@ class TritonWindow(Adw.ApplicationWindow):
             )
         except GLib.Error:
             return None
+
+    def _on_close(self, _window):
+        """Release the reader before the window goes. Synchronous on purpose:
+        two short D-Bus calls on the main loop, ordered, with no thread to
+        outlive the window."""
+        if getattr(self, "_enrolling", False) and self.fp_device is not None:
+            self._fp_release()
+        return False
 
     def _toast(self, message, timeout=5):
         toast = Adw.Toast(title=message)
@@ -655,6 +823,7 @@ class TritonWindow(Adw.ApplicationWindow):
         page.add(self._power_group())
         page.add(self._battery_group())
         page.add(self._keyboard_group())
+        page.add(self._fingerprint_group())
 
     @staticmethod
     def _graph_group(title, graph):
@@ -789,6 +958,290 @@ class TritonWindow(Adw.ApplicationWindow):
         self.kbd_row.connect("notify::active", self._on_kbd_toggled)
         group.add(self.kbd_row)
         return group
+
+    def _fingerprint_group(self):
+        """Everything fingerprint, in one place: the reader, what is enrolled,
+        enrolling and deleting, and whether hyprlock unlocks with it.
+
+        Deliberately NOT driven by the 2 s poll loop. Enrolled prints change
+        only when this panel changes them, and a timed ListEnrolledFingers
+        during an enrollment would race the EnrollStatus signals.
+        """
+        self.fp_device, self.fp_info = fprint_device()
+        self._enrolling = False
+        self._enroll_handler = None
+        self._enroll_stage = 0
+
+        group = Adw.PreferencesGroup(
+            title="Fingerprint",
+            description="ElanTech reader via fprintd. Unlocking is hyprlock's own "
+                        "D-Bus path, so no PAM file is touched.",
+        )
+
+        self.fp_status_row = Adw.ActionRow(title="Sensor")
+        self.fp_status_value = Gtk.Label(xalign=1.0)
+        self.fp_status_value.add_css_class("dim-label")
+        self.fp_status_row.add_suffix(self.fp_status_value)
+        group.add(self.fp_status_row)
+
+        self.fp_enrolled_row = Adw.ActionRow(title="Enrolled")
+        self.fp_enrolled_value = Gtk.Label(xalign=1.0)
+        self.fp_enrolled_value.add_css_class("dim-label")
+        self.fp_enrolled_row.add_suffix(self.fp_enrolled_value)
+        group.add(self.fp_enrolled_row)
+
+        self.fp_finger_row = Adw.ComboRow(title="Finger to enroll")
+        model = Gtk.StringList()
+        for _, label in FINGERS:
+            model.append(label)
+        self.fp_finger_row.set_model(model)
+        enroll = Gtk.Button(label="Enroll")
+        enroll.set_valign(Gtk.Align.CENTER)
+        enroll.add_css_class("suggested-action")
+        enroll.connect("clicked", self._on_enroll)
+        self.fp_enroll_button = enroll
+        self.fp_finger_row.add_suffix(enroll)
+        group.add(self.fp_finger_row)
+
+        self.fp_delete_row = Adw.ActionRow(
+            title="Delete all prints",
+            subtitle="Removes every enrolled finger for this user",
+        )
+        delete = Gtk.Button(label="Delete")
+        delete.set_valign(Gtk.Align.CENTER)
+        delete.add_css_class("destructive-action")
+        delete.connect("clicked", self._on_fp_delete)
+        self.fp_delete_button = delete
+        self.fp_delete_row.add_suffix(delete)
+        group.add(self.fp_delete_row)
+
+        self.fp_unlock_row = Adw.SwitchRow(
+            title="Unlock hyprlock with fingerprint",
+            subtitle="Writes a managed block in ~/.config/hypr/hyprlock.conf; "
+                     "password always keeps working",
+        )
+        self.fp_unlock_row.connect("notify::active", self._on_fp_unlock_toggled)
+        group.add(self.fp_unlock_row)
+
+        self.fp_sudo_row = Adw.ActionRow(title="sudo")
+        self.fp_sudo_value = Gtk.Label(xalign=1.0)
+        self.fp_sudo_value.add_css_class("dim-label")
+        self.fp_sudo_row.add_suffix(self.fp_sudo_value)
+        group.add(self.fp_sudo_row)
+
+        self._refresh_fingerprint()
+        return group
+
+    # -- fingerprint state -------------------------------------------------- #
+
+    def _refresh_fingerprint(self):
+        """One-shot read. Called at startup and after enroll/delete only."""
+        if self._enrolling:
+            return
+        self._updating = True
+        try:
+            if self.fp_device is None:
+                self.fp_status_value.set_text("no reader found")
+                self.fp_enrolled_value.set_text("--")
+                for widget in (self.fp_finger_row, self.fp_delete_row,
+                               self.fp_unlock_row, self.fp_enroll_button,
+                               self.fp_delete_button):
+                    widget.set_sensitive(False)
+                self.fp_sudo_value.set_text("--")
+                return
+
+            info = self.fp_info
+            self.fp_status_value.set_text(
+                f"{info['name']} · {info['scan_type']} · {info['stages']} stages"
+            )
+
+            fingers, error = fprint_list(self.fp_device, os.environ.get("USER", ""))
+            self._fp_fingers = fingers
+            if error:
+                self.fp_enrolled_value.set_text("unreadable")
+                self.fp_enrolled_row.set_subtitle(error)
+            else:
+                labels = {name: label for name, label in FINGERS}
+                self.fp_enrolled_value.set_text(
+                    ", ".join(labels.get(f, f) for f in fingers) if fingers else "none"
+                )
+                self.fp_enrolled_row.set_subtitle("")
+
+            enabled, conflict = hyprlock_block_state()
+            self.fp_unlock_row.set_active(enabled)
+            # Enabling with nothing enrolled would give a lock screen that asks
+            # for a finger it can never match.
+            self.fp_unlock_row.set_sensitive(bool(fingers) and conflict is None)
+            if conflict:
+                self.fp_unlock_row.set_subtitle(conflict)
+            elif not fingers:
+                self.fp_unlock_row.set_subtitle("Enroll a finger first")
+            else:
+                self.fp_unlock_row.set_subtitle(
+                    "Managed block in ~/.config/hypr/hyprlock.conf; "
+                    "applies at the next lock"
+                )
+
+            has_sudo = sudo_has_fprintd()
+            self.fp_sudo_value.set_text(
+                "--" if has_sudo is None else
+                ("pam_fprintd active" if has_sudo else "password only")
+            )
+        finally:
+            self._updating = False
+
+    def _fp_busy(self, busy):
+        self._enrolling = busy
+        for widget in (self.fp_finger_row, self.fp_enroll_button,
+                       self.fp_delete_button, self.fp_delete_row):
+            widget.set_sensitive(not busy)
+
+    def _fp_release(self):
+        """Release the reader. MUST run on every path out of an enrollment:
+        a claim left behind means the next Super+L has no fingerprint until
+        fprintd times it out."""
+        if self._enroll_handler is not None:
+            try:
+                self.fp_device.disconnect(self._enroll_handler)
+            except (TypeError, AttributeError):
+                pass
+            self._enroll_handler = None
+        for method in ("EnrollStop", "Release"):
+            try:
+                self.fp_device.call_sync(method, None, Gio.DBusCallFlags.NONE, 5000, None)
+            except GLib.Error:
+                pass
+
+    def _on_enroll(self, _button):
+        if self.fp_device is None or self._enrolling:
+            return
+        index = self.fp_finger_row.get_selected()
+        if index == Gtk.INVALID_LIST_POSITION:
+            return
+        finger, label = FINGERS[index]
+
+        # Claim raises the polkit dialog (enroll = auth_self_keep). If the user
+        # cancels it we never held the device, so nothing to release.
+        try:
+            self.fp_device.call_sync("Claim", GLib.Variant("(s)", (os.environ.get("USER", ""),)),
+                                     Gio.DBusCallFlags.NONE, 30000, None)
+        except GLib.Error as error:
+            self._toast(f"Could not claim the reader: {error.message}", timeout=7)
+            return
+
+        self._fp_busy(True)
+        self._enroll_stage = 0
+        # Subscribed before EnrollStart and disconnected in _fp_release, so a
+        # later enrollment never delivers into a stale closure.
+        self._enroll_handler = self.fp_device.connect("g-signal", self._on_enroll_signal)
+        try:
+            self.fp_device.call_sync("EnrollStart", GLib.Variant("(s)", (finger,)),
+                                     Gio.DBusCallFlags.NONE, 10000, None)
+        except GLib.Error as error:
+            self._fp_release()
+            self._fp_busy(False)
+            self._toast(f"Enrollment did not start: {error.message}", timeout=7)
+            return
+
+        verb = "Swipe" if self.fp_info["scan_type"] == "swipe" else "Press"
+        self.fp_finger_row.set_subtitle(
+            f"{verb} your {label.lower()} finger — 0/{self.fp_info['stages']}"
+        )
+        self._toast(f"{verb} your {label.lower()} finger on the reader", timeout=6)
+
+    def _on_enroll_signal(self, _proxy, _sender, signal, params):
+        """EnrollStatus(result, done). Termination keys on `done`, never on the
+        result string -- the non-terminal strings are only progress hints."""
+        if signal != "EnrollStatus":
+            return
+        result, done = params.unpack()
+        stages = self.fp_info["stages"] or 1
+
+        if not done:
+            if result == "enroll-stage-passed":
+                self._enroll_stage += 1
+                self.fp_finger_row.set_subtitle(
+                    f"Keep going — {self._enroll_stage}/{stages}"
+                )
+            else:
+                hints = {
+                    "enroll-retry-scan": "Did not read — try again",
+                    "enroll-swipe-too-short": "Swipe was too short — try again",
+                    "enroll-finger-not-centered": "Finger off centre — try again",
+                    "enroll-remove-and-retry": "Lift your finger and try again",
+                }
+                self.fp_finger_row.set_subtitle(hints.get(result, result))
+            return
+
+        self._fp_release()
+        self._fp_busy(False)
+        if result == "enroll-completed":
+            self.fp_finger_row.set_subtitle("")
+            self._toast("Finger enrolled", timeout=5)
+        else:
+            reasons = {
+                "enroll-failed": "the scans did not match",
+                "enroll-data-full": "the reader's storage is full",
+                "enroll-disconnected": "the reader disconnected",
+            }
+            self.fp_finger_row.set_subtitle("")
+            self._toast(f"Enrollment failed — {reasons.get(result, result)}", timeout=8)
+        self._refresh_fingerprint()
+
+    def _on_fp_delete(self, _button):
+        if self.fp_device is None or self._enrolling:
+            return
+        user = os.environ.get("USER", "")
+        try:
+            self.fp_device.call_sync("Claim", GLib.Variant("(s)", (user,)),
+                                     Gio.DBusCallFlags.NONE, 30000, None)
+        except GLib.Error as error:
+            self._toast(f"Could not claim the reader: {error.message}", timeout=7)
+            return
+        try:
+            self.fp_device.call_sync("DeleteEnrolledFingers", GLib.Variant("(s)", (user,)),
+                                     Gio.DBusCallFlags.NONE, 10000, None)
+            self._toast("All prints deleted", timeout=5)
+        except GLib.Error as error:
+            self._toast(f"Delete failed: {error.message}", timeout=8)
+        finally:
+            try:
+                self.fp_device.call_sync("Release", None, Gio.DBusCallFlags.NONE, 5000, None)
+            except GLib.Error:
+                pass
+        # Deleting the last print must also switch hyprlock back off, or the
+        # lock screen asks for a finger that no longer exists.
+        fingers, _ = fprint_list(self.fp_device, user)
+        if not fingers and hyprlock_block_state()[0]:
+            hyprlock_set(False, self.fp_info["scan_type"])
+            self._toast("hyprlock fingerprint unlock turned off too", timeout=6)
+        self._refresh_fingerprint()
+
+    def _on_fp_unlock_toggled(self, row, _param):
+        if self._updating:
+            return
+        wanted = row.get_active()
+        enabled, conflict = hyprlock_block_state()
+        if conflict:
+            self._toast(conflict, timeout=8)
+            self._updating = True
+            row.set_active(enabled)
+            self._updating = False
+            return
+        error = hyprlock_set(wanted, self.fp_info["scan_type"] if self.fp_info else "press")
+        if error:
+            self._toast(f"Could not write hyprlock.conf: {error}", timeout=8)
+            self._updating = True
+            row.set_active(enabled)
+            self._updating = False
+            return
+        self._toast(
+            ("Fingerprint unlock on — takes effect at the next lock. "
+             "The repo mirror configs/hypr/hyprlock.conf now differs."
+             if wanted else
+             "Fingerprint unlock off. The repo mirror now differs."),
+            timeout=8,
+        )
 
     # -- the poll loop ------------------------------------------------------ #
 
