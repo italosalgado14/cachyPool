@@ -49,6 +49,7 @@ Deliberate design choices worth keeping:
 import os
 import glob
 import math
+import signal
 import subprocess
 import time
 
@@ -70,6 +71,22 @@ HISTORY = 150  # 150 samples x 2 s = 5 minutes of graph
 # read "active" on every tick, and every tick would push its idle timer out.
 DGPU_POLL_SECONDS = 10
 DGPU_MANUAL_HOLD_SECONDS = 60
+
+# Automatic power saving — the toggle this panel owns and the state file the
+# daemon publishes. See configs/hypr/scripts/power-autoswitch.sh.
+#
+# The panel CANNOT ask Hyprland anything: it is launched from Walker, i.e. by the
+# systemd --user manager, which never sees HYPRLAND_INSTANCE_SIGNATURE, and
+# `hyprctl` without it just prints "is hyprland running?" (that env gap is the
+# same one documented in CLAUDE.md for env.conf). So the refresh rate shown here
+# is the rate the DAEMON observed and wrote down, never a reading of our own.
+POWER_AUTO_PREF = os.path.join(
+    os.environ.get("XDG_CONFIG_HOME") or os.path.expanduser("~/.config"),
+    "triton-panel", "power-auto",
+)
+POWER_STATE = os.path.join(
+    os.environ.get("XDG_RUNTIME_DIR") or "/tmp", "triton-power-mode",
+)
 
 ACER_PLATFORM = "/sys/devices/platform/acer-wmi"
 PLATFORM_PROFILE = "/sys/firmware/acpi/platform_profile"
@@ -306,6 +323,40 @@ class Sampler:
             "usb_pd_ports": len(usb),
         }
 
+    def _power_mode(self):
+        """What power-autoswitch.sh last published, or None if it is not running.
+
+        key=value lines. `ts` is what tells a live daemon from a state file left
+        behind by a dead one -- without that check the panel would happily show
+        a rate and a mode that nothing is maintaining any more.
+        """
+        values = {}
+        try:
+            with open(POWER_STATE) as handle:
+                for line in handle:
+                    key, _, value = line.partition("=")
+                    values[key.strip()] = value.strip()
+        except OSError:
+            return None
+        try:
+            age = time.time() - float(values.get("ts", 0))
+            stale_after = float(values.get("stale_after", 15))
+        except ValueError:
+            return None
+        if age > stale_after:
+            return None
+        values["_age"] = age
+        return values
+
+    @staticmethod
+    def _power_auto_pref():
+        """The toggle itself. Absent means ON -- same default as the daemon's."""
+        try:
+            with open(POWER_AUTO_PREF) as handle:
+                return handle.read().strip() != "0"
+        except OSError:
+            return True
+
     def _dock(self):
         for device in sorted(glob.glob(os.path.join(THUNDERBOLT, "*-*"))):
             vendor = read_text(os.path.join(device, "vendor_name"))
@@ -360,6 +411,8 @@ class Sampler:
             "dgpu": dgpu,
             "battery": self._battery(),
             "power": self._power_source(),
+            "power_mode": self._power_mode(),
+            "power_auto": self._power_auto_pref(),
             "dock": self._dock(),
             "platform_profile": read_text(PLATFORM_PROFILE),
             "platform_choices": (read_text(PLATFORM_CHOICES) or "").split(),
@@ -688,6 +741,22 @@ class TritonWindow(Adw.ApplicationWindow):
         self.dock_value.add_css_class("dim-label")
         self.dock_row.add_suffix(self.dock_value)
         group.add(self.dock_row)
+
+        # Automatic power saving. The switch writes a preference file and the
+        # daemon acts on it -- no root, so no triton-ctl here.
+        self.auto_row = Adw.SwitchRow(
+            title="Automatic power saving",
+            subtitle="On battery: 60 Hz + power-saver. On AC: 240 Hz + the "
+                     "previous profile.",
+        )
+        self.auto_row.connect("notify::active", self._on_power_auto_toggled)
+        group.add(self.auto_row)
+
+        self.mode_row = Adw.ActionRow(title="Power mode")
+        self.mode_value = Gtk.Label(xalign=1.0)
+        self.mode_value.add_css_class("dim-label")
+        self.mode_row.add_suffix(self.mode_value)
+        group.add(self.mode_row)
         return group
 
     def _battery_group(self):
@@ -843,6 +912,38 @@ class TritonWindow(Adw.ApplicationWindow):
         self.source_value.set_text(source)
         self.dock_value.set_text(reading["dock"] or "no dock")
 
+        # Automatic power saving. The switch mirrors the preference file; the
+        # value row reports what the daemon actually did, so a disagreement
+        # between the two is visible rather than hidden behind the switch.
+        self.auto_row.set_active(reading["power_auto"])
+        mode = reading["power_mode"]
+        if mode is None:
+            self.mode_value.set_text("daemon not running")
+            self.mode_row.set_subtitle(
+                "Start ~/.config/hypr/scripts/power-autoswitch.sh "
+                "(exec-once in autostart.conf runs it at login)"
+            )
+        else:
+            rate = mode.get("rate") or "--"
+            on_battery = mode.get("source") == "battery"
+            # The rate is blank while eDP-1 is disabled, which the 'read'
+            # monitor profile does deliberately -- not a fault.
+            rate_text = f"{rate} Hz" if rate not in ("", "--") else "panel off"
+            if mode.get("auto") == "0":
+                self.mode_value.set_text(f"manual · {rate_text}")
+                self.mode_row.set_subtitle(
+                    "Automation off — the rate is left wherever it is"
+                )
+            else:
+                self.mode_value.set_text(
+                    f"{'battery' if on_battery else 'AC'} · {rate_text}"
+                )
+                saved = mode.get("saved_profile") or ""
+                self.mode_row.set_subtitle(
+                    f"Saving — will restore {saved} on AC" if on_battery and saved
+                    else ("Saving" if on_battery else "Normal")
+                )
+
         # Battery
         battery = reading["battery"]
         if battery is None:
@@ -924,6 +1025,48 @@ class TritonWindow(Adw.ApplicationWindow):
         # looks like the panel and ppd disagreeing.
         relabel = "power-saver" if choice == "quiet" else "balanced"
         self._toast(f"Profile {choice} — ppd will now report {relabel}", timeout=7)
+
+    def _on_power_auto_toggled(self, row, _param):
+        """Write the preference, then poke the daemon so it acts immediately.
+
+        The poke targets the pid the daemon published. Deliberately NOT
+        `pkill -f power-autoswitch.sh`: -f matches whole command lines, so it
+        also signals any shell or editor whose argv merely mentions the script.
+        If the daemon is not running the preference is still saved and takes
+        effect when it next starts.
+        """
+        if self._updating:
+            return
+        wanted = row.get_active()
+        try:
+            os.makedirs(os.path.dirname(POWER_AUTO_PREF), exist_ok=True)
+            with open(POWER_AUTO_PREF, "w") as handle:
+                handle.write("1" if wanted else "0")
+        except OSError as error:
+            self._toast(f"could not save the setting: {error}")
+            self._updating = True
+            row.set_active(not wanted)
+            self._updating = False
+            return
+
+        state = self.sampler._power_mode()
+        pid = (state or {}).get("pid")
+        if not pid:
+            self._toast(
+                "Saved. The power daemon is not running, so this takes effect "
+                "when it starts.", timeout=7,
+            )
+            return
+        try:
+            os.kill(int(pid), signal.SIGUSR1)
+        except (OSError, ValueError):
+            self._toast("Saved, but the power daemon did not answer", timeout=7)
+            return
+        self._toast(
+            "Automatic power saving on" if wanted else
+            "Automatic power saving off — 240 Hz restored, profile unchanged",
+            timeout=6,
+        )
 
     def _on_cap_toggled(self, row, _param):
         if self._updating:

@@ -26,11 +26,43 @@ general-purpose monitor reads it:
 * **Load** — CPU percentage / average frequency / package temperature, memory
   with the zram figure, iGPU clock, and dGPU state.
 * **Power** — the full 5-state platform profile selector, what
-  power-profiles-daemon currently reports, the power source, and the
-  Thunderbolt dock.
+  power-profiles-daemon currently reports, the power source, the Thunderbolt
+  dock, and **automatic power saving**: a switch, plus a row showing the mode
+  the daemon is actually in.
 * **Battery** — the 80% charge cap as a switch, plus charge, status, draw,
   health against design capacity, cycle count, and pack temperature.
 * **Keyboard** — backlight on/off (see the caveat below).
+
+## Automatic power saving
+
+The **Automatic power saving** switch in the Power group turns on a daemon that
+follows the power source:
+
+| | laptop panel | platform profile |
+|---|---|---|
+| on battery | `2560x1600@60` | `power-saver` |
+| on AC | `2560x1600@240` | whatever was active before |
+
+The panel only writes `~/.config/triton-panel/power-auto` (`1`/`0`, and **absent
+means on**) and sends `SIGUSR1` so the change takes effect at once. The work is
+done by `configs/hypr/scripts/power-autoswitch.sh`, started from `autostart.conf`;
+`finish-installation-commands.md` §19 has the full design.
+
+Two things about this are worth knowing before editing either side:
+
+* **The panel cannot ask Hyprland anything.** It is launched from Walker, i.e.
+  by the systemd `--user` manager, which never sees `HYPRLAND_INSTANCE_SIGNATURE`
+  — `hyprctl` just answers "is hyprland running?". So the refresh rate shown in
+  the *Power mode* row is the rate the **daemon** observed and wrote into
+  `$XDG_RUNTIME_DIR/triton-power-mode`, never a reading of the panel's own. If
+  that file is missing or its `ts` is stale, the row says "daemon not running"
+  rather than showing a number nothing is maintaining.
+* **Signal the daemon by the `pid` it publishes**, never
+  `pkill -f power-autoswitch.sh`: `-f` matches whole command lines, so it also
+  hits any shell or editor whose argv merely mentions the script.
+
+Turning the switch **off** restores 240 Hz and then leaves the rate alone; it
+deliberately does *not* undo the platform profile you are currently sitting on.
 
 ## Also here
 

@@ -10,6 +10,10 @@
 #   monitor-mode.sh trio       # both 16" portables + laptop, laptop in the middle
 #   monitor-mode.sh toggle     # flip desktop<->read at the desk, trio<->read on
 #                              # the road (default if no arg)
+#   monitor-mode.sh edp-rate   # reconcile ONLY the laptop panel's refresh rate
+#                              # with the power source (240 Hz on AC, 60 Hz on
+#                              # battery). Not a layout; see the block above the
+#                              # dispatch. Called by power-autoswitch.sh.
 #
 # Applies via `hyprctl keyword`, so nothing here is persistent — a `hyprctl
 # reload` or relog returns to whatever monitors.conf says. To make a profile
@@ -31,6 +35,42 @@ STATE="${XDG_RUNTIME_DIR:-/tmp}/hypr-monitor-mode"
 # self-inflicted instead of treating them as a real plug/unplug.
 FPFILE="${XDG_RUNTIME_DIR:-/tmp}/hypr-monitor-fingerprint"
 CYCLED=0
+
+# --------------------------------------------------------------------------- #
+# eDP-1's refresh rate — ONE owner (2026-10-31)
+#
+# The built-in panel has exactly two modes: 2560x1600@240 and 2560x1600@60.
+# Running it at 60 on battery is the cheapest real saving available on this
+# machine, so the rate is not a constant any more: it is resolved from the power
+# source by edp_mode() and EVERY site that emits an eDP-1 spec must call it.
+#
+# Do not reintroduce a `2560x1600@240` literal. Before this existed the string
+# was repeated at 8 sites here plus a 9th path through apply_from_profile (which
+# emits .Hz straight out of the hyprmon JSON, where desktop.json carries
+# 240.00301), so anything setting the rate from outside was undone by the next
+# profile apply, hotplug autoswitch or `hyprctl reload`.
+#
+# "On battery" is the SAME test hypridle's suspend listener uses, deliberately:
+# BAT1/status covers barrel AC, USB-C PD and dock power alike, whereas
+# ACAD/online reads 1 when only the TB4 dock is feeding the machine.
+EDP_PREF="${XDG_CONFIG_HOME:-$HOME/.config}/triton-panel/power-auto"
+EDP_HI="2560x1600@240"
+EDP_LO="2560x1600@60"
+
+on_battery() {
+  grep -q Discharging /sys/class/power_supply/BAT1/status 2>/dev/null
+}
+
+# Absent pref file means ENABLED: the automatic saving is the default, and a
+# fresh checkout must behave the same as a configured one. The `|| echo 1`
+# matters under `set -euo pipefail` — a missing file must not abort the switch.
+power_auto() {
+  [[ "$(cat "$EDP_PREF" 2>/dev/null || echo 1)" != 0 ]]
+}
+
+edp_mode() {
+  if power_auto && on_battery; then printf '%s' "$EDP_LO"; else printf '%s' "$EDP_HI"; fi
+}
 
 # Identity of the enabled monitor set — name + description, order independent.
 # Must stay byte-identical to monitor_fingerprint() in monitor-autoswitch.sh:
@@ -152,16 +192,25 @@ resolve_externals() {
 PROFILE_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/hyprmon/profiles"
 
 apply_from_profile() {
-  local mode="$1" file mons plan name active spec tf
+  local mode="$1" file mons plan name active spec tf edphz
   file="$PROFILE_DIR/$mode.json"
   [[ -f "$file" ]] || return 1
   mons="$(hyprctl monitors all -j 2>/dev/null)" || return 1
+  # Just the Hz out of edp_mode()'s "2560x1600@<hz>" — jq compares it numerically.
+  edphz="$(edp_mode)"; edphz="${edphz##*@}"
 
   # One TSV line per profile monitor — connector, active, spec, transform —
   # active ones first. Empty output = the profile doesn't fit what's connected.
   # Hz is rounded to 2 decimals in jq rather than with printf, which would follow
   # the locale's decimal separator.
-  plan="$(jq -r --slurpfile p "$file" '
+  #
+  # eDP-1's Hz is OVERRIDDEN with $edphz rather than taken from the JSON. This is
+  # the 9th emit site for the laptop panel's rate and the easiest to miss: the
+  # profiles were saved by hyprmon while docked on AC, so desktop.json carries
+  # eDP-1 at 240.00301, and without this override every docked profile apply
+  # would quietly put the panel back to 240 Hz while on battery. The externals
+  # keep their own JSON rate — only the built-in panel is power-managed.
+  plan="$(jq -r --slurpfile p "$file" --argjson edphz "$edphz" '
       def hwid: [(.make // ""), (.model // ""), (.serial // "")]
                 | map(tostring | gsub("^\\s+|\\s+$"; ""))
                 | if .[0] == "" and .[1] == "" then ""
@@ -176,8 +225,10 @@ apply_from_profile() {
         then empty
         else ($prof | sort_by(if .Active then 0 else 1 end))[]
              | $conn[.hardware_id] as $n
+             | (if $n == "eDP-1" then $edphz
+                else ((.Hz * 100 | round) / 100) end) as $hz
              | [$n, (.Active | tostring),
-                "\($n),\(.PxW)x\(.PxH)@\((.Hz * 100 | round) / 100),\(.X)x\(.Y),\(.Scale)",
+                "\($n),\(.PxW)x\(.PxH)@\($hz),\(.X)x\(.Y),\(.Scale)",
                 (.Transform // 0 | tostring)]
              | @tsv
         end' <<<"$mons" 2>/dev/null)" || plan=""
@@ -207,7 +258,7 @@ apply_desktop() {
   resolve_externals
   if [[ -n "$EXT_QHD" && -n "$EXT_OTHER" ]]; then
     hyprctl --batch "\
-      keyword monitor eDP-1,2560x1600@240,0x0,1.25 ; \
+      keyword monitor eDP-1,$(edp_mode),0x0,1.25 ; \
       keyword monitor $EXT_OTHER,$EXT_OTHER_MODE,2048x0,$EXT_OTHER_SCALE"
     # transform 0 stated explicitly and routed through apply_monitor_tf: coming
     # back from 'read' this has to UNDO a rotation, which needs the same output
@@ -219,7 +270,7 @@ apply_desktop() {
     # Fewer than two resolvable externals — lay the connected ones out generically
     # rather than forcing a geometry no attached panel can actually do.
     local batch ext
-    batch="keyword monitor eDP-1,2560x1600@240,0x0,1.25"
+    batch="keyword monitor eDP-1,$(edp_mode),0x0,1.25"
     while read -r ext; do
       [[ -n "$ext" ]] && batch+=" ; keyword monitor $ext,preferred,auto,1"
     done < <(hyprctl monitors all -j | jq -r '.[] | select(.name != "eDP-1") | .name')
@@ -261,7 +312,7 @@ apply_read() {
     if (( n > 0 )); then
       hyprctl --batch "${batch}keyword monitor eDP-1,disable"
     else
-      hyprctl --batch "keyword monitor eDP-1,2560x1600@240,0x0,1.25"
+      hyprctl --batch "keyword monitor eDP-1,$(edp_mode),0x0,1.25"
     fi
   fi
   echo read > "$STATE"
@@ -269,7 +320,7 @@ apply_read() {
 }
 
 apply_laptop() {
-  hyprctl --batch "keyword monitor eDP-1,2560x1600@240,0x0,1.25"
+  hyprctl --batch "keyword monitor eDP-1,$(edp_mode),0x0,1.25"
   echo laptop > "$STATE"
   notify-send -t 2000 "Monitors" "Laptop only (integrated screen)" 2>/dev/null || true
 }
@@ -301,10 +352,10 @@ apply_onescreen() {
     else
       hyprctl keyword monitor "$ext,$mode,0x0,$scale" >/dev/null
     fi
-    hyprctl keyword monitor "eDP-1,2560x1600@240,${w}x0,1.25" >/dev/null
+    hyprctl keyword monitor "eDP-1,$(edp_mode),${w}x0,1.25" >/dev/null
   else
     # Safety net: no external present -> laptop only
-    hyprctl --batch "keyword monitor eDP-1,2560x1600@240,0x0,1.25"
+    hyprctl --batch "keyword monitor eDP-1,$(edp_mode),0x0,1.25"
   fi
   echo onescreen > "$STATE"
   notify-send -t 2000 "Monitors" "One external + laptop" 2>/dev/null || true
@@ -318,7 +369,7 @@ apply_trio() {
   if [[ -n "$EXT_QHD" && -n "$EXT_OTHER" ]]; then
     hyprctl --batch "\
       keyword monitor $EXT_OTHER,$EXT_OTHER_MODE,0x0,1 ; \
-      keyword monitor eDP-1,2560x1600@240,${EXT_OTHER_W}x0,1.25"
+      keyword monitor eDP-1,$(edp_mode),${EXT_OTHER_W}x0,1.25"
     # Same reason as apply_desktop: 'trio' may follow 'read', so the AQ16H's
     # rotation has to be undone through apply_monitor_tf.
     apply_monitor_tf "$EXT_QHD" \
@@ -331,7 +382,7 @@ apply_trio() {
     # $STATE: the autoswitcher would then re-attempt trio on every hotplug
     # event forever, spamming notifications and never converging.
     local batch ext
-    batch="keyword monitor eDP-1,2560x1600@240,0x0,1.25"
+    batch="keyword monitor eDP-1,$(edp_mode),0x0,1.25"
     while read -r ext; do
       [[ -n "$ext" ]] && batch+=" ; keyword monitor $ext,preferred,auto,1"
     done < <(hyprctl monitors all -j | jq -r '.[] | select(.name != "eDP-1") | .name')
@@ -342,6 +393,44 @@ apply_trio() {
 }
 
 mode="${1:-toggle}"
+
+# --------------------------------------------------------------------------- #
+# edp-rate — re-emit ONLY eDP-1's refresh rate at whatever edp_mode() resolves,
+# keeping its current position and scale. This is the reconcile hook
+# power-autoswitch.sh calls; it is not a layout profile and deliberately does
+# NOT touch $STATE, the fingerprint handshake or swayosd, so it can run every
+# few seconds without the autoswitcher ever seeing it.
+#
+# Three guards, each for a failure found while building this:
+#
+#   1. eDP-1 must be in `hyprctl monitors -j` (ENABLED outputs only, never
+#      `monitors all`). In 'read' mode the laptop panel is deliberately
+#      disabled, and `hyprctl keyword monitor eDP-1,<mode>,...` against a
+#      disabled output does not set a rate — it ENABLES the output. That would
+#      silently undo 'read' every 5 seconds.
+#   2. Skip while DPMS is off. A modeset wakes the panel, so reconciling under
+#      hypridle's 10-minute DPMS-off would turn the screen back on by itself.
+#   3. Only emit when the rate actually differs. Hyprland is not relied on to
+#      deduplicate an identical keyword, and a real modeset every 5 s would
+#      flicker the panel and flood the log.
+if [[ "$mode" == "edp-rate" ]]; then
+  want="$(edp_mode)"; want_hz="${want##*@}"
+  read -r cur_hz cur_x cur_y cur_scale cur_dpms < <(
+    hyprctl monitors -j 2>/dev/null \
+      | jq -r '.[] | select(.name=="eDP-1")
+               | "\(.refreshRate|round) \(.x) \(.y) \(.scale) \(.dpmsStatus)"' 2>/dev/null
+  ) || exit 0
+  # Written as `if` blocks, not `(( )) && exit`: under `set -e` a bare failing
+  # arithmetic test as the first element of an AND-OR list is a foot-gun.
+  if [[ -z "${cur_hz:-}" ]]; then exit 0; fi                  # guard 1
+  # jq prints `null` for a monitor with no refreshRate, and a non-numeric value
+  # would abort the whole script in the arithmetic test below under `set -e`.
+  if [[ ! "$cur_hz" =~ ^[0-9]+$ ]]; then exit 0; fi
+  if [[ "$cur_dpms" != "true" ]]; then exit 0; fi             # guard 2
+  if (( cur_hz == ${want_hz%%.*} )); then exit 0; fi          # guard 3
+  hyprctl keyword monitor "eDP-1,$want,${cur_x}x${cur_y},$cur_scale" >/dev/null
+  exit 0
+fi
 
 if [[ "$mode" == "toggle" ]]; then
   current="$(cat "$STATE" 2>/dev/null || echo desktop)"
@@ -362,7 +451,7 @@ fi
 case "$mode" in
   desktop|read|laptop|onescreen|trio)
     apply_from_profile "$mode" || "apply_$mode" ;;
-  *) echo "usage: $0 {desktop|read|laptop|onescreen|trio|toggle}" >&2; exit 1 ;;
+  *) echo "usage: $0 {desktop|read|laptop|onescreen|trio|toggle|edp-rate}" >&2; exit 1 ;;
 esac
 
 sleep 0.4

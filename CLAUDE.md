@@ -120,6 +120,22 @@ external hotplug events, so it is paired with a fingerprint handshake that keeps
 `monitor-autoswitch.sh` from reverting a manual `Super+M` choice — if you touch either
 script, keep both halves in step. Fixed 2026-08-04; see `ACTUAL-CONFIGURATION.md` §11 / §15.
 
+**eDP-1's refresh rate has exactly one owner (since 2026-10-31):** `edp_mode()` in
+`monitor-mode.sh`. It resolves `2560x1600@240` or `@60` from the power source
+(`grep -q Discharging /sys/class/power_supply/BAT1/status`, the same test hypridle uses —
+never `ACAD/online`, which reads 1 when only the TB4 dock feeds the machine) and the
+`~/.config/triton-panel/power-auto` toggle. **Never write a `2560x1600@240` literal into that
+script.** The rate used to be hardcoded at 8 sites there plus a 9th path through
+`apply_from_profile`, which emits `.Hz` straight from the hyprmon JSON where `desktop.json`
+carries `240.00301` — so anything setting the rate from outside was undone by the next profile
+apply, hotplug autoswitch or `hyprctl reload`. `scripts/power-autoswitch.sh` (exec-once) drives
+it: the **rate is reconciled** on every stable tick because nothing else can own it, while the
+**platform profile changes only on a power-source transition** because Triton Panel exposes it
+and a manual choice must survive. `monitor-mode.sh edp-rate` is the reconcile hook — it no-ops
+when eDP-1 is absent from `hyprctl monitors -j` (the `read` profile disables it, and a
+`keyword monitor` against a disabled output *enables* it) or when DPMS is off (a modeset would
+wake the panel). See `finish-installation-commands.md` §19.
+
 **Profile geometry can come from Hyprmon (since 2026-10-15).** `apply_from_profile` in
 `monitor-mode.sh` applies `~/.config/hyprmon/profiles/<mode>.json` (mirrored in
 `configs/hyprmon/profiles/`) when its monitors, matched by EDID `hardware_id`, are exactly

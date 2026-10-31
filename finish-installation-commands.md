@@ -2004,6 +2004,118 @@ Then drop the `dev.isalgado.TritonPanel` block from `windowrules.conf`.
 
 ---
 
+## 19. Automatic power saving by power source — ✅ APPLIED 2026-10-31
+
+On battery the machine now drops the laptop panel to 60 Hz and switches the
+platform profile to `power-saver`; on AC it restores 240 Hz and the profile that
+was active before. Two actions only — no backlight, no hypridle changes, no
+charge-cap changes, no dGPU parameters.
+
+eDP-1 has exactly two modes (`2560x1600@240` and `2560x1600@60`, same resolution
+and scale), so this costs nothing but smoothness and is the cheapest real saving
+available here.
+
+### 19a. Why the refresh rate needed a single owner first
+
+`2560x1600@240` was hardcoded at **8 sites** in `monitor-mode.sh` plus a **9th**
+path through `apply_from_profile`, which emits `.Hz` straight out of the hyprmon
+JSON — and `configs/hyprmon/profiles/desktop.json` carries eDP-1 at `240.00301`
+because it was saved while docked on AC. Anything setting the rate from outside
+was therefore undone by the next profile apply, hotplug autoswitch or
+`hyprctl reload`.
+
+So the rate is now resolved in one place:
+
+```bash
+# monitor-mode.sh
+edp_mode() { if power_auto && on_battery; then printf %s "$EDP_LO"; else printf %s "$EDP_HI"; fi; }
+```
+
+**Never reintroduce a `2560x1600@240` literal in that script.** `apply_from_profile`
+overrides eDP-1's Hz with `--argjson edphz`; the externals keep their JSON rate.
+
+`on_battery` is `grep -q Discharging /sys/class/power_supply/BAT1/status`, the
+same test hypridle's suspend listener uses — not `ACAD/online`, which reads 1
+when only the TB4 dock is feeding the machine, and `Not charging` (the 80% cap
+holding on AC) must count as AC.
+
+### 19b. The two policies are deliberately different
+
+| | policy | why |
+|---|---|---|
+| **Rate** | reconciled every stable tick (idempotent) | no manual UI exists for it, so there is no user choice to override — and reconciling is what repairs a `hyprctl reload`, a `Super+M` switch or a hotplug autoswitch |
+| **Profile** | changed only on a power-source **transition** | the profile *is* exposed in Triton Panel, so a `performance` chosen on battery must survive |
+
+### 19c. Install
+
+```bash
+cd ~/code/cachyPool
+cp configs/hypr/scripts/monitor-mode.sh      ~/.config/hypr/scripts/monitor-mode.sh
+cp configs/hypr/scripts/power-autoswitch.sh  ~/.config/hypr/scripts/power-autoswitch.sh
+chmod +x ~/.config/hypr/scripts/power-autoswitch.sh
+cp configs/hypr/autostart.conf               ~/.config/hypr/autostart.conf   # adds the exec-once
+install -Dm755 triton-panel/triton-panel     ~/.local/bin/triton-panel
+
+# exec-once does NOT re-run on a reload, so start it once for this session:
+~/.config/hypr/scripts/power-autoswitch.sh &
+```
+
+### 19d. Verify — results 2026-10-31
+
+```bash
+cat /run/user/1000/triton-power-mode     # source/auto/rate/saved_profile/pid/ts
+hyprctl monitors -j | jq -r '.[] | select(.name=="eDP-1") | .refreshRate'
+powerprofilesctl get
+```
+
+Checked on battery, all passing:
+
+| check | result |
+|---|---|
+| daemon start on battery | rate 240 → **60**, profile `balanced` → **power-saver**, `saved_profile=balanced` |
+| `monitor-mode.sh laptop` afterwards | stays **60** — the centralization proof; before this change it forced 240 |
+| `hyprctl reload` (snaps to `monitors.conf` @240) | daemon restored **60** within one tick, unattended |
+| panel switch → off | **240** restored, profile left on `power-saver` as designed |
+| panel switch → on | back to **60**, and `saved_profile` still `balanced`, not `power-saver` |
+| `edp-rate` while DPMS off | **no-op** — a modeset would wake the panel |
+| `edp-rate` run twice | second run emits nothing (rate already matches) |
+
+⚠ **The AC branch is still untested** — it needs the charger physically plugged
+in. Expect 240 Hz and `balanced` restored, plus a "On AC" notification.
+
+### 19e. Gotchas found while building this
+
+* **Never signal the daemon with `pkill -f power-autoswitch.sh`.** `-f` matches
+  whole command lines, so it also hits any shell, editor or pager whose argv
+  merely mentions the script — during testing it killed the shell running the
+  test. The daemon publishes `pid=` in its state file; signal that.
+* **`edp-rate` must no-op when eDP-1 is absent from `hyprctl monitors -j`.**
+  The `read` profile disables the laptop panel on purpose, and a
+  `keyword monitor eDP-1,<mode>,…` against a disabled output does not set a
+  rate — it *enables* the output, silently undoing `read` every few seconds.
+* **Skip the modeset while `dpmsStatus` is false**, or reconciling under
+  hypridle's 10-minute DPMS-off turns the screen back on by itself.
+
+### 19f. Revert
+
+```bash
+rm ~/.config/hypr/scripts/power-autoswitch.sh
+# drop the exec-once line from autostart.conf, then:
+echo 0 > ~/.config/triton-panel/power-auto   # or just leave it: no daemon, no effect
+~/.config/hypr/scripts/monitor-mode.sh edp-rate   # back to 240
+```
+
+`edp_mode()` itself is harmless with the daemon gone: with the pref at `0` it
+always resolves to 240, exactly the old hardcoded behaviour.
+
+### 19g. Docs updated 2026-10-31
+
+`ACTUAL-CONFIGURATION.md` §10 (new daemon), §11 (new script + the rate-owner
+rule), §15 (new row); `CLAUDE.md` (monitor section); `triton-panel/README.md`;
+this section.
+
+---
+
 ## Order of operations summary
 
 | Priority | Section | Reboot needed? |
@@ -2026,6 +2138,7 @@ Then drop the `dev.isalgado.TritonPanel` block from `windowrules.conf`.
 | ✅ Done 2026-10-16 | 16. Visual monitor layouts: Hyprmon editor + Monitors menu | No |
 | ✅ Done 2026-10-31 | 17. Force `predator_v4` → fan RPM + 5-state `platform_profile` | Live: No · **Confirm on the next boot** |
 | ✅ Done 2026-10-31 | 18. `triton-panel` GUI (depends on 17) | No |
+| ✅ Done 2026-10-31 | 19. Automatic power saving by power source (60 Hz + power-saver on battery) | No |
 
 ---
 
