@@ -1,5 +1,10 @@
 # CachyOS + Hyprland Setup Guide
 
+> ⚠ **Archived 2026-11-03 — do not apply this on the current system.** It describes an
+> earlier state of the machine and several of its claims are known stale. Current facts:
+> `../ACTUAL-CONFIGURATION.md`. How a subsystem works now: `../runbooks/`. Why this is
+> kept rather than deleted, and the stale claims to recognise on sight: `README.md`.
+
 **System:** Acer Predator PT516-52s
 **Date:** May 2026
 **OS:** CachyOS (Arch-based, rolling release)

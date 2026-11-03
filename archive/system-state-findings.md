@@ -1,5 +1,10 @@
 # Hyprland Install — System State Findings
 
+> ⚠ **Archived 2026-11-03 — do not apply this on the current system.** It describes an
+> earlier state of the machine and several of its claims are known stale. Current facts:
+> `../ACTUAL-CONFIGURATION.md`. How a subsystem works now: `../runbooks/`. Why this is
+> kept rather than deleted, and the stale claims to recognise on sight: `README.md`.
+
 **Scan date:** 2026-05-21
 **Compared against:** `cachyos-hyprland-setup.md` (planned setup) + `spected-installation.md` (expected stack)
 **Currently in session:** Hyprland 0.55.2 / Wayland / kernel 7.0.9-1-cachyos / NVIDIA 595.71.05

@@ -186,7 +186,7 @@ ENROLL_RESULTS = {
 # Calibration: the verify vocabulary, and what a result actually proves
 # --------------------------------------------------------------------------- #
 #
-# Added 2026-11-01 (see finish-installation-commands.md §20o). Enrolment
+# Added 2026-11-01 (see `../runbooks/fingerprint.md` §20o). Enrolment
 # finally succeeded that morning -- and `fprintd-verify` then failed 4 times
 # out of 4. So the panel could enrol a finger that unlocks nothing, and say
 # nothing about it: every signal it showed was an ENROLMENT signal, and

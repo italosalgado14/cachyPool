@@ -1,3 +1,10 @@
+# Expected Installation — Pre-Install Stack Rationale
+
+> ⚠ **Archived 2026-11-03 — do not apply this on the current system.** It describes an
+> earlier state of the machine and several of its claims are known stale. Current facts:
+> `../ACTUAL-CONFIGURATION.md`. How a subsystem works now: `../runbooks/`. Why this is
+> kept rather than deleted, and the stale claims to recognise on sight: `README.md`.
+
 For your stated goals, here's what I'd run:
 Compositor: Hyprland (decided) — but keep animations subtle. Edit animations config to use default curves and ~150ms durations, not the 500ms bouncy ones.
 Terminal: Ghostty. Mitchell Hashimoto's (HashiCorp founder) terminal. Fast, GPU-accelerated, sane defaults, no Lua config drama. If unavailable on CachyOS, Kitty — battle-tested, image preview support (useful for previewing plots, diffs, etc. in TUI tools).
@@ -13,7 +20,7 @@ Clipboard manager: cliphist + Walker plugin. Super+V to paste from history.
 Auth prompts: hyprpolkitagent. Lightweight, matches Hyprland aesthetic.
 Audio/brightness OSD: SwayOSD. The little volume/brightness popup when you press laptop hotkeys.
 File manager: Yazi (terminal, Rust, image previews via Kitty graphics, vim-like). For occasional GUI need, keep KDE's Dolphin — it's already installed and excellent.
-Video player: VLC (`sudo pacman -S vlc`). Plays anything you throw at it without codec hunting, handles network/DVD/subtitle formats the lightweight players skip, and its plugin set is already installed on this machine (`vlc-plugins-all`) — only the binary and the Qt GUI are missing. Alternative already present: Haruna (mpv/Qt, `org.kde.haruna.desktop`) if you want a lighter, Wayland-native player. Install steps + the hardware-decode caveat for this machine: `finish-installation-commands.md` §13.
+Video player: VLC (`sudo pacman -S vlc`). Plays anything you throw at it without codec hunting, handles network/DVD/subtitle formats the lightweight players skip, and its plugin set is already installed on this machine (`vlc-plugins-all`) — only the binary and the Qt GUI are missing. Alternative already present: Haruna (mpv/Qt, `org.kde.haruna.desktop`) if you want a lighter, Wayland-native player. Install steps + the hardware-decode caveat for this machine: `../runbooks/gpu-video.md` §13.
 Editor: Use what you already use. If you're a Neovim person, LazyVim is the current default starter config. If you're VS Code, just keep VS Code — running it on Wayland works fine.
 Theme: Catppuccin Mocha. It is the dev theme of 2025-2026. Subtle, dark, low-contrast, easy on eyes for long sessions. Everything I listed above has a Catppuccin theme officially. Alternative: Tokyo Night (slightly more contrast).
 Font: JetBrains Mono Nerd Font (with ligatures and dev icons). Install: sudo pacman -S ttf-jetbrains-mono-nerd. Alternative: Iosevka Nerd Font if you prefer narrower characters.

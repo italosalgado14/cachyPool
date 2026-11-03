@@ -1,6 +1,6 @@
 # Shortcuts & Daily Usability — Hyprland on CachyOS
 
-**Machine:** Acer Predator PT516-52s (Triton 500 SE) · **Last verified:** 2026-05-23
+**Machine:** Acer Predator PT516-52s (Triton 500 SE) · **Last verified:** 2026-11-03
 **Source of truth:** `~/.config/hypr/keybindings.conf` (mirrored in `configs/hypr/keybindings.conf`).
 
 > **`Super`** = the Windows/⌘ key (a.k.a. `mainMod`). Every shortcut below uses Super as the anchor.
@@ -263,7 +263,7 @@ the layout automatically from what's plugged in:
   `configs/hyprmon/profiles/`) wins; otherwise `monitor-mode.sh`'s hand-written layout.
   Full details in `ACTUAL-CONFIGURATION.md` §11 "Monitor profiles & auto-switching".
 
-> If you want bigger UI on the laptop later: bump `eDP-1` scale to `1.333333` (2560 ÷ 1.333333 = **1920** logical) and shift the two externals right by the same 128 px — Xiaomi `@ 1920x0`, portable QHD `@ 4992x0` (1920 + 3072). Easiest now: do it in Hyprmon (`R` or `[`/`]` for scale, drag the others left) and save with `P` as `desktop`. For the boot default, also edit `monitors.conf`. See `system-state-findings.md` and `finish-installation-commands.md` for the math.
+> If you want bigger UI on the laptop later: bump `eDP-1` scale to `1.333333` (2560 ÷ 1.333333 = **1920** logical) and shift the two externals right by the same 128 px — Xiaomi `@ 1920x0`, portable QHD `@ 4992x0` (1920 + 3072). Easiest now: do it in Hyprmon (`R` or `[`/`]` for scale, drag the others left) and save with `P` as `desktop`. For the boot default, also edit `monitors.conf`. See `runbooks/monitors.md` §5 for the math.
 
 ---
 
@@ -289,7 +289,7 @@ Walker (`Super` + `Space`) replaces rofi/wofi/krunner. Behaviors that are easy t
 
 ### 4.1 Architecture (matters when things break)
 
-Walker 2.x is a thin GTK4 frontend; the actual capability comes from **Elephant**, a separate background daemon that loads each provider as a `.so` module. On this machine Elephant runs as a user systemd unit (`~/.config/systemd/user/elephant.service`) — see `finish-installation-commands.md` §7e for the install path.
+Walker 2.x is a thin GTK4 frontend; the actual capability comes from **Elephant**, a separate background daemon that loads each provider as a `.so` module. On this machine Elephant runs as a user systemd unit (`~/.config/systemd/user/elephant.service`) — see `runbooks/desktop-apps.md` §7e for the install path.
 
 - Frontend daemon (autostart): `walker --gapplication-service` — keeps the GTK window pre-warmed.
 - Backend daemon (user unit): `elephant.service` — must be `active` for any prefix or `walker -m <mode>` to return results. If it's down you'll see `Please install elephant.` on `walker -m clipboard` from a terminal.

@@ -50,7 +50,7 @@ follows the power source:
 The panel only writes `~/.config/triton-panel/power-auto` (`1`/`0`, and **absent
 means on**) and sends `SIGUSR1` so the change takes effect at once. The work is
 done by `configs/hypr/scripts/power-autoswitch.sh`, started from `autostart.conf`;
-`finish-installation-commands.md` §19 has the full design.
+`../runbooks/power-battery.md` §19 has the full design.
 
 Two things about this are worth knowing before editing either side:
 
@@ -184,7 +184,7 @@ the cause was the panel's *instructions*, not the hardware: the window asked
 for a swipe on a pad that cannot be swiped, and never said to lift between
 stages. `FP_DEVICE_ERROR_PROTO` does still appear in `journalctl -u fprintd`,
 but it is **intermittent, not blocking** — the successful run had none. The
-lesson worth keeping is in `finish-installation-commands.md` §20l: `No minutiae
+lesson worth keeping is in `../runbooks/fingerprint.md` §20l: `No minutiae
 found` is a *geometry* result, and reading it as a driver verdict is what cost
 three sessions. The device's declared `scan-type = swipe` comes from that same
 driver and was checked against the chassis on 2026-11-01 — it is simply
@@ -494,7 +494,7 @@ user-writable would hand away the box. Install it exactly as step 2 above.
   no charge-limit support and BAT1 exposes no `charge_control_*` node, so
   TLP/powerdevil thresholds do nothing on this machine.
 
-Neither is installed by this app; see `finish-installation-commands.md`.
+Neither is installed by this app; see `../runbooks/power-battery.md` §17 and §14.
 
 ## The keyboard caveat
 

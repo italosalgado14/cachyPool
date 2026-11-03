@@ -29,6 +29,6 @@ usual rule that `configs/` is a hand-maintained mirror.
 ## Why it is separate from the panel
 
 Same dependency as the panel: without `predator_v4=1`
-(`finish-installation-commands.md` §17) there is no `acer` hwmon, and the module
+(`../../runbooks/power-battery.md` §17) there is no `acer` hwmon, and the module
 shows `--` with the reason in its tooltip rather than zeros. It also never
 hardcodes `hwmonN` — see the header of `waybar-acer.sh`.
