@@ -29,8 +29,10 @@ general-purpose monitor reads it:
   power-profiles-daemon currently reports, the power source, the Thunderbolt
   dock, and **automatic power saving**: a switch, plus a row showing the mode
   the daemon is actually in.
-* **Battery** — the 80% charge cap as a switch, plus charge, status, draw,
-  health against design capacity, cycle count, and pack temperature.
+* **Battery** — a graph of how much has been consumed and how long the draw
+  right now leaves (below), the 80% charge cap as a switch, plus charge,
+  status, draw, health against design capacity, cycle count, and pack
+  temperature.
 * **Keyboard** — backlight on/off (see the caveat below).
 * **Fingerprint** — the reader, what is enrolled, enrolling and deleting, and
   whether hyprlock unlocks with it.
@@ -66,6 +68,104 @@ Two things about this are worth knowing before editing either side:
 Turning the switch **off** restores 240 Hz and then leaves the rate alone; it
 deliberately does *not* undo the platform profile you are currently sitting on.
 
+## Battery: what has gone, and what is left
+
+The Battery group opens with one picture that puts the history and the
+projection on the **same linear time axis**: a green line for the charge that
+was actually observed, an amber band for how much has been consumed since the
+run began, and a dashed blue line carrying the present draw forward to empty —
+or up to the 80% cap when the pack is charging.
+
+The join in the middle is the point of it. The dashed line is literally the
+solid line's current rate extended, so a projection that disagrees with the
+slope you can see is one you can catch. Two scales side by side would make
+every slope look alike, which is the usual way a battery widget manages to be
+both pretty and useless. For the same reason the y axis is pinned to 0–100%
+and never autoscales: here the floor *is* the question.
+
+Three numbers, and they are not interchangeable:
+
+| | what it is | where |
+|---|---|---|
+| **draw** | EMA of `current_now × voltage_now`, ~45 s time constant | *Consumption* value |
+| **average** | charge moved ÷ elapsed, over the whole run | *Consumption* subtitle |
+| **time left** | remaining Wh ÷ draw | *Time left* value, and the dashed line |
+
+The draw is the one that answers "at the consumption *right now*", which is why
+the projection divides by it. A single `current_now` sample is too noisy to
+divide by — one read on 2026-11-02 gave 23.2 W while upower's smoothed figure
+for the same minute said 30.3 W, a 40-minute difference in the answer — so it
+is smoothed over seconds, never over the run. The run average sits beside it as
+the cross-check: when the two disagree the session has not been uniform, and
+having both on screen is how that shows, instead of being averaged into one
+authoritative-looking figure.
+
+### Where the history comes from
+
+This panel is a window launched from Walker, not a daemon, so its own trace is
+empty at exactly the moment someone opens it to ask how much battery has gone.
+The stretch from before the window existed is read **once per run** from
+upower's `GetHistory` over D-Bus — the only reading in this app that does not
+come from sysfs; the live sample still does.
+
+upower marks the places where it lost track of the device with a
+`(timestamp, 0.0, 0)` entry, and the walk backwards stops at the first one. A
+real answer from this machine:
+
+```
+(1793667268, 64.0, 2), (1793667268, 0.0, 0), (1793640616, 64.0, 2)
+```
+
+— the same 64%, 7.4 hours apart, with the machine asleep in between. The run
+that is still going starts at the marker. Stitching across it would draw a
+seven-hour flat segment and then call it consumption.
+
+### What ends a run
+
+* **A reversal** — discharging to charging, or back.
+* **A hole in the wall clock** longer than 30 s. `time.monotonic()` does not
+  advance across s2idle and `time.time()` jumps, so a suspend appears here as a
+  gap. The machine was not consuming at its awake rate while it slept, so the
+  trace and the EMA both restart and the row says so. hypridle suspends this
+  laptop on battery, so this is the ordinary path, not an edge case. A
+  **backwards** jump counts as a hole too — without that an NTP step would
+  freeze the EMA for the rest of the session.
+
+  Thirty seconds, not `4 × POLL_SECONDS`, because the panel's own main loop
+  blocks: `sudo -n triton-ctl` waits up to 8 s on a cap or profile write,
+  `nvidia-smi` up to 4 s on **Read now**. At a tighter threshold, pressing a
+  switch was indistinguishable from a resume. And upower is re-asked after
+  *every* gap, which is what makes a false one self-healing: a stall leaves no
+  marker in upower's history, so it hands the whole run back and the trace is
+  rebuilt rather than lost for the rest of the session.
+
+What does *not* end a run is an idle status. `Not charging` is what this
+machine reports all day with AC connected and the cap holding, and it is also
+what a one-tick blip looks like; wiping the curve there would throw away the
+discharge someone is looking at. Idle stops the projection, says why, and
+nothing more.
+
+### What the projection is not
+
+It divides the **whole** remaining charge by the draw. The firmware cuts off a
+few percent above zero, so the clock time is the outer edge rather than a
+promise, and the subtitle says so. A charge is projected to 80% whenever the
+cap is on, because that is where charging actually stops — and `charge_full` is
+the denominator, not `charge_full_design`: this pack reads 101.7 Wh full
+against a 100.0 Wh design, so a target computed from the design figure would
+never arrive. Under 0.5 W nothing is divided at all, and past 24 h the answer
+reads `> 24 h` instead of a clock time nobody should believe.
+
+`test-battery.py` replays the whole thing headlessly — the suspend, the idle
+blip, the reversal, the clamp, the decimation, and a recorded `GetHistory`
+answer from this machine — and renders the widget onto a Cairo image surface in
+every state, because an exception inside a draw handler becomes a GTK warning
+and an empty widget rather than a crash:
+
+```bash
+cd triton-panel && python3 test-battery.py
+```
+
 ## Fingerprint
 
 Everything fingerprint in one group: the sensor (name, scan type, enroll
@@ -78,7 +178,220 @@ listing never prompts, and `…device.enroll` is `auth_self_keep`, so `Claim()`
 raises a dialog for your *own* password. `/var/lib/fprint` is root-only, so
 nothing is read from the filesystem — it is all D-Bus.
 
-Three invariants to keep if you edit this:
+✅ **Enrolment works** — `right-index-finger`, 2026-11-01, 6/6 in ~54 s with two
+rejections and **zero** protocol errors. It had failed for three sessions, and
+the cause was the panel's *instructions*, not the hardware: the window asked
+for a swipe on a pad that cannot be swiped, and never said to lift between
+stages. `FP_DEVICE_ERROR_PROTO` does still appear in `journalctl -u fprintd`,
+but it is **intermittent, not blocking** — the successful run had none. The
+lesson worth keeping is in `finish-installation-commands.md` §20l: `No minutiae
+found` is a *geometry* result, and reading it as a driver verdict is what cost
+three sessions. The device's declared `scan-type = swipe` comes from that same
+driver and was checked against the chassis on 2026-11-01 — it is simply
+**wrong**:
+the part is a ~1 cm square pad in the corner of the touchpad, an area/press
+sensor with nothing to slide a finger along. `AREA_SENSORS` keys that fact by
+USB id, `fprint_device()` exposes it as `info["gesture"]`, and **every
+instruction in the UI plus the hyprlock `ready_message` is built from
+`gesture`, never from `scan_type`** — which is kept and displayed only because
+what the driver claims is evidence about the driver. This also explains the
+`No minutiae found`: a press on an area pad gives frames with no displacement,
+so `elan`'s multi-frame motion assembly has nothing to stitch.
+
+### One press is one measurement — but the device is NEVER deaf
+
+Two rules, and keeping them separate is the whole point:
+
+1. **The verify is always re-armed immediately**, on every result, whatever the
+   bucket. The reader must be listening every moment the user might touch it.
+2. **Counting** a result as a measurement waits for evidence of a new press.
+
+They were briefly coupled, and that was a regression: making the *re-arm* wait
+for the lift left the panel deaf for 3 s after every result and touches were
+simply lost. **A missed count is a wrong measurement; a missed re-arm is a lost
+touch.** Different failure modes, different decisions.
+
+Why rule 2 exists: a real session logged 44 s of `No minutiae found` / protocol
+error alternating every 1–3 s while the finger never left the pad. Every
+`done = True` re-armed the verify, each fresh `VerifyStart` captured the **same
+resting finger**, and each garbage image appended another reject to the rolling
+window — so the gate announced "Captures are too thin" about a placement made
+**once**. It was measuring the panel's own loop.
+
+"Is this a new press?" uses two signals, and **neither is the strip's open
+contact** — `close_open_contact()` shuts that artificially on every result,
+which is why a dozen results from one press each showed a plausible duration:
+
+* any `finger-present` **transition** since the last counted result (the **ON**
+  edge is the best evidence something moved, and it doesn't depend on the OFF
+  edge this driver emits invalidly — §20j);
+* `SAME_PRESS_S = 2.0`, a wall-clock escape so unreliable presence reporting
+  can never suppress the measurement forever. That path logs `Counted without a
+  reported lift`, because driver-reported and assumed must stay distinguishable.
+
+A reader that never reports contact (`strip.supported is not True`) is not
+gated at all.
+
+⚠ `MAX_CAL_DRY` does not cover any of this. It counts driver faults with **no**
+finger contact — a wedged endpoint. A resting finger is the opposite case.
+
+⚠ Before changing anything here, run `./fp-debug.sh presence` and look at the
+signal. Two bugs in a row came from guessing at it.
+
+### Each stage must capture a DIFFERENT region
+
+An enrolled NBIS print is **not one merged template**. It is a `GPtrArray` of
+per-stage minutiae sets (`FpPrint` exposes it as `fpi-prints`, plural), and
+`fpi_print_bz3_match` loops over **every** stored set, returning success on the
+**first** one to reach the bz3 threshold (default 40). **One-of-N, not a
+composite.**
+
+So six identical placements store six near-duplicates and waste five of the six
+slots; six *different* regions are six independent chances for a single verify
+capture to overlap one. On a ~1 cm pad that is the difference between a template
+that can be matched and one that cannot — and it is why phone enrolment asks you
+to shift the finger and then do the edges.
+
+`ENROLL_REGIONS` holds the six, and `_stage_hint()` names the next one after
+every accepted stage. `_region_for()` indexes modulo the list and stops at the
+device's own stage count, so a reader reporting 5 or 8 stages still gets a
+region for each.
+
+⚠ This window used to say to use the **same** placement every stage. That
+conflated the `elan` driver stitching *frames within one capture* with how
+libfprint stores *stages across an enrolment* — the first is real, the second
+is not stitching at all. Don't reintroduce it.
+
+### Test a stored print
+
+**Test** in the Fingerprint group runs one verify and puts the verdict in the
+row's subtitle: `Claim` → `VerifyStart("any")` → one `VerifyStatus` → report →
+`VerifyStop` → `Release`. It is the quick "does the print I have work?" check,
+and the thing to press before going near the enrolment window — "enrolled" and
+"works" are different states, which is the whole lesson of 2026-11-01.
+
+`"any"` scores against every enrolled template (what `fprintd-verify` with no
+`-f` does) and `VerifyFingerSelected` names whichever print matched.
+
+**The hazard here is the claim, not the verdict.** fprintd grants one at a time
+and a leaked claim leaves the next `Super+L` with no fingerprint until fprintd
+times it out — and a verify nobody touches never ends by itself. So this
+releases on *every* exit: the result, **Cancel**, Cancel pressed while polkit's
+dialog is still up (the claim is granted server-side regardless, so it is
+released in the claim callback), the window closing, and a hard
+`TEST_TIMEOUT_MS = 30 s`. The timeout is a correctness requirement, not a
+nicety. A retry result (`done = False`) must **not** release: fprintd keeps the
+verify open and is already waiting.
+
+A no-match says *the stored print, not your finger* — see the calibration
+section for why that is the honest reading.
+
+### Calibration: measure matching before touching the print
+
+Added 2026-11-01. **This window does not treat "enrolled" as the goal.** On
+2026-11-01 a 6/6 enrolment produced a template that then failed
+`fprintd-verify` 4 times out of 4 — and every number in the window read as
+success, because they were all *enrolment* signals. Enrolment passing says
+almost nothing about matching.
+
+So **Calibrate placement** runs first. It loops `VerifyStart("any")` and
+buckets each attempt:
+
+| bucket | results | meaning |
+|---|---|---|
+| **scored** | `verify-match`, `verify-no-match` | an image was produced **and** minutiae extracted, so the matcher ran |
+| **rejected** | `verify-retry-scan`, `-too-short`, `-too-fast`, `-finger-not-centered`, `-remove-and-retry` | the capture never reached the matcher |
+| **driver** | `verify-disconnected`, `verify-unknown-error` | the device faulted; nothing to do with the hand |
+
+That split is the whole value. A **high scored rate with `no-match` every
+time** is evidence about the *stored template*, not your placement — the one
+case where re-enrolling helps. A **low scored rate** is placement or the
+small-sensor ceiling, and enrolling from captures that thin just builds another
+unmatchable template, so the window says so and labels the button *"Enroll
+anyway"* rather than recommending it.
+
+Gate: **≥10 attempts and ≥8 of the last 10 scored** — rolling, so a placement
+you converge on is not dragged down by the fumbling at the start. Deliberately
+**not configurable**: a knob would invite tuning the threshold until it passes,
+which is the one thing that would make the measurement worthless.
+
+Properties worth keeping if you edit this:
+
+* **Calibration writes nothing.** Verify neither enrols nor deletes. Safe to
+  repeat indefinitely.
+* **"scored" is an inference, not a measurement.** It follows libfprint's flow
+  (extraction fails → retry; succeeds → bozorth3 → match/no-match) and is
+  consistent with the journal, but it is *not* a per-capture minutiae count —
+  only `./fp-debug.sh verify` prints one. That is why the UI says "scored" and
+  never "good". A missing log line is not a measurement.
+* **Driver faults stay out of the rolling window.** Counting them would blame
+  the hand for something it cannot fix.
+* **The verify loop follows fprintd's state machine.** `VerifyStop` before the
+  next `VerifyStart` once a status arrives with `done = True` — and **both**
+  match and no-match are `done = True`. A retry is `done = False`, leaves the
+  verify open with fprintd already waiting, and must **not** be cycled. That
+  asymmetry is invisible from the UI; it is the first thing
+  `test-enroll.py` asserts.
+* **`VerifyFingerSelected` is not an outcome** — it names the template about to
+  be scored. Logged as info, never counted as an attempt.
+* **Enrolling into an occupied slot overwrites it**, and the window says so.
+  The slot name is only a *label*, so a free slot can hold the same physical
+  finger — that is the non-destructive way to test a fresh template. The panel
+  never deletes anything on its own.
+
+### The enrolment window
+
+**Enroll** opens a window of its own that owns the claim for its lifetime.
+Enrolling used to report through a single subtitle on a combo row, which is how
+every failed attempt across three sessions produced nothing to go on. It shows a **contact strip**
+(the last 12 s of fprintd's `finger-present`, with each result marked on the
+same time axis), **stage pills**, a running **tally**, and a timestamped
+**attempt log** mirrored to stderr for `journalctl --user`.
+
+Rules to keep if you edit it:
+
+1. **Classify every result `gesture` / `driver` / `fatal`, and say which.**
+   This is the whole point. "Try again, slower" in response to a driver fault
+   is how someone swipes forty times at a reader that was never going to
+   answer. An *undocumented* result string is treated as `driver`.
+2. **Bake in no target speed.** The window measures the user's own contacts and
+   labels the ones that passed. The right dwell for a sensor is not something
+   this panel can honestly claim to know.
+3. **Advance stages only on `enroll-stage-passed`.** A rejected attempt really
+   does not count, and pretending otherwise makes the next failure baffling.
+4. **Keep `Claim` async.** It waits on a polkit password prompt; synchronously
+   it froze the window before it painted.
+5. **Take the result vocabulary from the D-Bus spec**, not from memory. The
+   first version silently lacked `enroll-too-fast`, `enroll-duplicate` and
+   `enroll-unknown-error` — and the last one is exactly what this machine emits.
+6. **Say to lift, on every stage.** libfprint's image-device cycle
+   (`AWAIT_FINGER_ON → CAPTURE → AWAIT_FINGER_OFF → IDLE`) will not start the
+   next capture until the driver reports the finger **gone**, so a finger left
+   resting on the sensor stalls the run with no message. `_cycle_hint()` builds
+   that line from `gesture` (**not** `scan-type` — see above); it is used on
+   `enroll-stage-passed`, on every
+   `gesture` retry, and in the guide. fprintd's own answer to a *passed* stage
+   is "Lift then touch again" — this panel was the only client of the three
+   that never said it. A precondition of the protocol is not an exception to
+   rule 1.
+7. **Restart the enrolment on a `driver` terminal; never end the session.**
+   The fault ends fprintd's enrolment, not the claim the window owns, so
+   `_restart_enrollment()` does `EnrollStop` + `EnrollStart` and the user is
+   not sent back through polkit — which used to cost a password every few
+   captures on this machine. It runs **before** `_stop()` on purpose: `_stop`
+   disconnects `g-signal`, and restarting after it would leave the next
+   `EnrollStatus` with nowhere to go and the window hung with nothing in the
+   log. The stage count really does return to 0 (fprintd discards partial
+   progress) and the hint says so rather than resetting quietly. Two caps —
+   `MAX_DRY_RESTARTS` for a wedged endpoint faulting with no contact,
+   `MAX_RESTARTS` as a ceiling — and the UI names which one tripped. `fatal`
+   results are never restarted. Regression test: `test-enroll.py`.
+
+Run `python3 -I test-enroll.py` from this directory after touching the
+enrolment flow: 40 assertions over `_handle_result`, with the widgets and the
+D-Bus proxy stubbed, covering the paths a real finger reaches only by accident.
+
+Three invariants to keep if you edit the group:
 
 1. **Claim → EnrollStart → EnrollStop → Release on every path out**, errors and
    `close-request` included. A claim left behind means the next `Super+L` has
@@ -252,6 +565,14 @@ makes it uncertain:
 * **Power source is its own row** because the TB4 dock feeds this laptop over
   USB-C PD: `ACAD/online` can read 1 with no barrel jack attached. Anything
   deciding "are we on battery?" has to look at `BAT1/status`.
+* **The battery trace keeps its first point fixed.** A flat percentage
+  collapses into one moving endpoint so that six hours cost about eighty points
+  instead of ten thousand — but letting that collapse touch the *first* point
+  drags the run's start forward on every tick, so a panel left alone at 60%
+  would report a run that began a second ago and an average computed from
+  whatever sliver was left once the percentage finally moved. Found by
+  `test-battery.py`, not by watching: it needs a percentage to hold for
+  minutes, which is precisely what it does on a 100 Wh pack.
 
 ## Troubleshooting
 

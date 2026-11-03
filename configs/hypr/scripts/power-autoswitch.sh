@@ -199,19 +199,51 @@ while :; do
       # PROFILE — transitions only.
       if [[ "$raw" != "$last_source" ]]; then
         if [[ "$raw" == battery ]]; then
-          # Only capture on the FIRST entry into battery. Flipping the toggle
-          # off and on again while already on battery re-enters this branch,
-          # and overwriting here would record `power-saver` as "what I had" —
-          # so plugging in later would restore power-saver instead of the
-          # profile from before the machine ever went to battery.
-          # Cleared on the AC transition, which is what re-arms the capture.
-          [[ -n "$saved_profile" ]] || saved_profile="$(current_profile)"
+          # THE INVARIANT: never record `power-saver` as saved_profile.
+          #
+          # `power-saver` while on battery can only ever be this daemon's own
+          # doing, so it carries no information about what the user wanted on
+          # AC. Recording it makes the AC branch "restore" power-saver, and
+          # since power-profiles-daemon persists its choice across reboots
+          # (/var/lib/power-profiles-daemon/state.ini) that feeds itself: every
+          # boot re-persists power-saver, so `balanced` on AC dies quietly.
+          # Measured 2026-11-02 — the live state file had ratcheted from
+          # `balanced` (2026-10-31) to `power-saver`.
+          #
+          # Two paths reach here without a real AC->battery transition, and the
+          # guard covers both:
+          #   1. the daemon's first tick (`last_source=unknown` makes the first
+          #      stable read count as a transition, so a battery boot lands
+          #      here with nothing meaningful to capture);
+          #   2. flipping the Triton Panel toggle off and on again while
+          #      already on battery, which re-enters via `last_source=unknown`.
+          # The `-n` half additionally keeps a genuine capture from being
+          # overwritten. Cleared on the AC transition, which re-arms it.
+          [[ -n "$saved_profile" || "$(current_profile)" == power-saver ]] \
+            || saved_profile="$(current_profile)"
           set_profile power-saver
           notify-send -t 3000 "Power" "On battery — 60 Hz, power-saver" 2>/dev/null || true
         else
-          set_profile "${saved_profile:-balanced}"
-          notify-send -t 3000 "Power" \
-            "On AC — 240 Hz, ${saved_profile:-balanced}" 2>/dev/null || true
+          # Restore only what was actually captured. With nothing captured
+          # there are two cases, and they are not the same:
+          #   - we are sitting in `power-saver`: that is ours (see above), so
+          #     hand it back to ppd's default rather than stay power-capped
+          #     on AC. This is the battery-boot-then-plug-in path.
+          #   - any other profile: the user picked it, or ppd restored their
+          #     pick at an AC boot. Leave it alone — forcing `balanced` here
+          #     is exactly how a hand-picked `performance` used to be lost.
+          applied=""
+          if [[ -n "$saved_profile" ]]; then
+            applied="$saved_profile"
+          elif [[ "$(current_profile)" == power-saver ]]; then
+            applied=balanced
+          fi
+          if [[ -n "$applied" ]]; then
+            set_profile "$applied"
+          else
+            applied="$(current_profile) (left as-is)"
+          fi
+          notify-send -t 3000 "Power" "On AC — 240 Hz, $applied" 2>/dev/null || true
           saved_profile=""
         fi
         last_source="$raw"

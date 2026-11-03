@@ -52,6 +52,7 @@ import pathlib
 import math
 import signal
 import subprocess
+import sys
 import time
 
 import gi
@@ -121,6 +122,168 @@ FINGERS = [
 HYPRLOCK_BEGIN = "# >>> triton-panel: fingerprint unlock >>>"
 HYPRLOCK_END = "# <<< triton-panel: fingerprint unlock <<<"
 
+# --------------------------------------------------------------------------- #
+# Enrollment: result vocabulary, and why it is classified
+# --------------------------------------------------------------------------- #
+#
+# Every string fprintd can send on EnrollStatus, taken from the interface spec
+# at /usr/share/dbus-1/interfaces/net.reactivated.Fprint.Device.xml rather than
+# from memory -- the first version of this panel was missing enroll-too-fast,
+# enroll-duplicate and enroll-unknown-error, and showed the raw D-Bus string.
+#
+# `kind` is the part that matters, and it is not cosmetic:
+#
+#   gesture -> the user can fix it by moving differently.
+#   driver  -> the user CANNOT fix it. The driver could not talk to the sensor.
+#              Telling someone to "try again, slower" in this case is how they
+#              end up swiping forty times at a reader that was never going to
+#              answer. This machine is a live example: libfprint's in-tree
+#              `elan` driver claims 04f3:0c4f and then fails it with
+#              "The driver encountered a protocol error with the device".
+#   fatal   -> the run ended and retrying the same way will not help.
+#
+ENROLL_RESULTS = {
+    "enroll-stage-passed": (
+        "stage", "Stage captured", ""),
+    "enroll-retry-scan": (
+        "gesture", "No usable detail",
+        "The capture had no readable ridges. Cover more of the sensor."),
+    "enroll-swipe-too-short": (
+        "gesture", "Contact too short",
+        "Stay on the sensor longer -- do not lift partway."),
+    "enroll-too-fast": (
+        "gesture", "Too fast",
+        "Slow the movement down; the driver needs more frames."),
+    "enroll-finger-not-centered": (
+        "gesture", "Off centre",
+        "Put the pad of the finger over the middle of the sensor."),
+    "enroll-remove-and-retry": (
+        "gesture", "Lift and retry",
+        "Take the finger right off the sensor, then go again."),
+    "enroll-completed": (
+        "done", "Enrolled", ""),
+    "enroll-failed": (
+        "fatal", "The captures did not agree",
+        "The stages passed but would not merge into one print. Use the same "
+        "part of the finger on every stage and start over."),
+    "enroll-duplicate": (
+        "fatal", "Already enrolled",
+        "This finger is already stored (possibly for another user). "
+        "Pick a different finger, or delete the existing print."),
+    "enroll-data-full": (
+        "fatal", "Reader storage is full",
+        "Delete prints from the reader before enrolling another."),
+    "enroll-disconnected": (
+        "driver", "Reader disconnected",
+        "The device vanished mid-enrollment. Nothing here is your gesture."),
+    "enroll-unknown-error": (
+        "driver", "Driver fault",
+        "fprintd hit a device or driver error, not a bad gesture. Check "
+        "`journalctl -u fprintd` for the underlying message."),
+}
+
+# --------------------------------------------------------------------------- #
+# Calibration: the verify vocabulary, and what a result actually proves
+# --------------------------------------------------------------------------- #
+#
+# Added 2026-11-01 (see finish-installation-commands.md §20o). Enrolment
+# finally succeeded that morning -- and `fprintd-verify` then failed 4 times
+# out of 4. So the panel could enrol a finger that unlocks nothing, and say
+# nothing about it: every signal it showed was an ENROLMENT signal, and
+# enrolment passing tells you almost nothing about matching.
+#
+# Two causes stayed indistinguishable from fprintd's summary journal (§20n):
+#
+#   H1  the stored template is marginal -- 6 accepted captures with 2
+#       rejections on a ~1 cm pad -- so nothing will ever match it;
+#   H2  the VERIFY captures are too thin. Verify gets ONE capture per touch
+#       where enrolment stitched six, so it is strictly the harder operation
+#       and may simply sit under the matcher's floor.
+#
+# Verify is the only NON-DESTRUCTIVE way to tell them apart -- it writes
+# nothing -- which is what the calibration phase runs. The classification
+# below turns on a single distinction:
+#
+#   "scored"    the sensor produced an image AND libfprint extracted minutiae
+#               from it, so the matcher ran and returned a number. Both
+#               `verify-match` and `verify-no-match` mean this.
+#   "rejected"  the capture never reached the matcher at all.
+#   "driver"    the device or driver faulted; says nothing about the hand.
+#
+# WHY THAT SPLIT IS THE USEFUL ONE: a high scored rate with `no-match` every
+# time is evidence about the TEMPLATE (H1) -- the hand is delivering readable
+# ridges and the stored print is what cannot be matched -- and that is exactly
+# the case where re-enrolling is worth doing. A low scored rate is placement
+# or the small-sensor ceiling (H2), and re-enrolling from captures that thin
+# would just build another unmatchable template.
+#
+# /!\ "scored" is an INFERENCE about libfprint's flow -- extraction fails ->
+# retry, extraction succeeds -> bozorth3 -> match/no-match. It is consistent
+# with the 2026-11-01 journal (one `No minutiae found` followed by a
+# `verify-no-match` in the same run) but it is NOT confirmed against a
+# per-capture minutiae count; `./fp-debug.sh verify` is the only thing that
+# would print one. So the UI says "scored", never "good", and the window says
+# in as many words what the number is and is not evidence of. If a debug run
+# ever contradicts this, the claim is labelled as the inference it is and
+# nothing has to be retracted. (This is the §20g mistake in miniature: a
+# missing log line is not a measurement.)
+VERIFY_RESULTS = {
+    "verify-match": (
+        "stage", "Matched", "scored",
+        "The stored print matched this capture."),
+    "verify-no-match": (
+        "scored", "Scored, did not match", "scored",
+        "The sensor got readable ridges and the matcher scored them below "
+        "the threshold. This one is about the stored print, not your hand."),
+    "verify-retry-scan": (
+        "gesture", "No usable detail", "rejected",
+        "The capture had no readable ridges, so the matcher never ran. "
+        "Cover more of the pad."),
+    "verify-swipe-too-short": (
+        "gesture", "Contact too short", "rejected",
+        "Stay on the sensor longer -- do not lift partway."),
+    "verify-too-fast": (
+        "gesture", "Too fast", "rejected",
+        "Slow down; the driver needs more frames."),
+    "verify-finger-not-centered": (
+        "gesture", "Off centre", "rejected",
+        "Put the pad of the finger over the middle of the sensor."),
+    "verify-remove-and-retry": (
+        "gesture", "Lift and retry", "rejected",
+        "Take the finger right off the sensor, then go again."),
+    "verify-disconnected": (
+        "driver", "Reader disconnected", "driver",
+        "fprintd reports this for a protocol error too -- on this machine the "
+        "sensor has never actually left the USB bus (§20m). Not your hand."),
+    "verify-unknown-error": (
+        "driver", "Driver fault", "driver",
+        "A device or driver error, not a bad gesture. Check "
+        "`journalctl -u fprintd`."),
+}
+
+# The PHYSICAL sensor, which the driver's scan-type gets wrong here.
+#
+# fprintd reports scan-type = "swipe" for 04f3:0c4f, and that string comes from
+# libfprint's `elan` driver -- the same driver whose intermittent protocol
+# errors litter this machine's journal. The part in this chassis was checked by
+# eye on 2026-11-01: a ~1 cm
+# square in the corner of the touchpad, i.e. an AREA/PRESS pad. A finger cannot
+# be slid along it, so "swipe" is not merely unconfirmed (as the docs had it),
+# it is WRONG -- and every instruction derived from it was asking for a motion
+# the hardware cannot receive.
+#
+# So the panel keeps both. `scan_type` is what the driver claims: evidence
+# about the driver, worth displaying. `gesture` is the physical truth, and it
+# is what every instruction and the hyprlock ready_message are built from.
+# Keyed by USB id, because that is what identifies the part -- never by the
+# driver's own reported name.
+#
+# This also sharpens the upstream analysis of the sibling 04f3:0903: a press on
+# an area pad produces frames with no displacement between them, `elan`'s
+# multi-frame motion assembly has nothing to stitch, and extraction ends in
+# "No minutiae found" -- which is exactly what this machine's journal shows.
+AREA_SENSORS = {"04f3:0c4f"}
+
 ACER_PLATFORM = "/sys/devices/platform/acer-wmi"
 PLATFORM_PROFILE = "/sys/firmware/acpi/platform_profile"
 PLATFORM_CHOICES = "/sys/firmware/acpi/platform_profile_choices"
@@ -130,6 +293,61 @@ AC = "/sys/class/power_supply/ACAD"
 IGPU_PCI = "/sys/bus/pci/devices/0000:00:02.0"
 DGPU_PCI = "/sys/bus/pci/devices/0000:01:00.0"
 THUNDERBOLT = "/sys/bus/thunderbolt/devices"
+
+# --------------------------------------------------------------------------- #
+# Battery projection constants
+# --------------------------------------------------------------------------- #
+#
+# "How long is left at the current consumption" is three different
+# measurements, and conflating them is how a projection ends up lying:
+#
+#   * the DRAW is instantaneous -- current_now x voltage_now, two seconds
+#     apart -- and it is noisy: one sample on 2026-11-02 read 23.2 W while
+#     upower's own smoothed figure for the same minute said 30.3 W. Dividing
+#     the remaining charge by a raw sample makes the answer jump by half an
+#     hour per tick. So the headline rate is an EMA with a ~45 s time
+#     constant: still the consumption *now*, without the jitter.
+#   * the AVERAGE over the run is the more trustworthy number, but it is a
+#     different question ("what has this session been costing"), so it is
+#     shown beside the draw and never instead of it.
+#   * the HISTORY is what has already been consumed, and most of it predates
+#     the panel: this is a Walker-launched window, not a daemon, so its own
+#     trace is empty at exactly the moment someone opens it to ask. upower
+#     has kept the percent curve since the unplug, which is what the graph is
+#     seeded from (see upower_charge_history).
+BATTERY_EMA_SECONDS = 45             # time constant of the draw EMA
+BATTERY_TRACE_SECONDS = 6 * 3600     # how much of one run the graph keeps
+BATTERY_AVG_MIN_SECONDS = 600        # no run average below this much of a run
+BATTERY_AVG_MIN_PERCENT = 2.0        # ... nor below this much movement
+BATTERY_RATE_FLOOR_W = 0.5           # below this, dividing by it is nonsense
+BATTERY_PROJECTION_MAX_SECONDS = 24 * 3600
+BATTERY_MIN_PAST_SECONDS = 15 * 60   # the x axis always shows this much past
+BATTERY_MIN_FUTURE_SECONDS = 10 * 60 # ... and this much future
+
+# A wall-clock hole larger than this ends the run.
+#
+# time.monotonic() does NOT advance across s2idle and time.time() jumps, so a
+# suspend appears here as a gap -- and a gap is exactly where the drain rate
+# and the trace have to restart: the machine was not consuming at its awake
+# rate while it slept, and carrying the EMA or the curve across the hole would
+# average a sleeping laptop into an awake projection. hypridle suspends this
+# machine on battery (hypridle.conf, armed again since the pack came back on
+# 2026-10-31), so this is the ordinary case here, not an edge one.
+#
+# It is deliberately far above 4 x POLL_SECONDS, because the panel's own main
+# loop blocks: `sudo -n triton-ctl` waits up to 8 s on every cap or profile
+# write, nvidia-smi up to 4 s on "Read now", the upower seed up to 4 s. At a
+# tighter threshold one press of a switch was indistinguishable from a resume.
+# Nothing moves a 100 Wh pack measurably in 30 s, so the wait costs nothing.
+BATTERY_GAP_SECONDS = 30
+
+# upower, used for ONE thing: the part of the curve that happened before the
+# panel was opened. Everything live is still read straight from sysfs.
+UPOWER_NAME = "org.freedesktop.UPower"
+UPOWER_DEVICE = "/org/freedesktop/UPower/devices/battery_" + os.path.basename(BAT)
+# upower's own state enum, as returned by GetHistory. 0 is UNKNOWN, which it
+# writes as a (timestamp, 0.0, 0) marker wherever it lost track of the device.
+UPOWER_STATE = {"charging": 1, "discharging": 2, "full": 4}
 
 # power-profiles-daemon has only three targets, so two of the five platform
 # states are unreachable through it and must be written directly.
@@ -169,12 +387,20 @@ def fprint_device():
         value = device.get_cached_property(name)
         return value.unpack() if value is not None else default
 
+    declared = prop("scan-type", "press")
+    usb_id, _ = reader_usb()
+    area = usb_id in AREA_SENSORS
     return device, {
         "name": prop("name", "fingerprint reader"),
         "stages": prop("num-enroll-stages", 0) or 0,
-        # "swipe" on the ElanTech sensor here; "press" on most others. The UI
-        # verb comes from this rather than being hardcoded.
-        "scan_type": prop("scan-type", "press"),
+        # What the driver CLAIMS. "swipe" on the ElanTech sensor here, "press"
+        # on most others. Displayed, never used to build an instruction.
+        "scan_type": declared,
+        "usb_id": usb_id,
+        # What the HARDWARE is. Every verb in the UI comes from this. See
+        # AREA_SENSORS for why the two can disagree.
+        "gesture": "press" if area else declared,
+        "driver_scan_type_wrong": area and declared != "press",
     }
 
 
@@ -214,8 +440,14 @@ def hyprlock_block_state():
     return ("enabled = true" in managed), None
 
 
-def hyprlock_set(enabled, scan_type):
-    """Add, update or remove the managed block. Atomic (tmp + rename)."""
+def hyprlock_set(enabled, gesture):
+    """Add, update or remove the managed block. Atomic (tmp + rename).
+
+    `gesture` is the PHYSICAL gesture (info["gesture"]), not the driver's
+    declared scan-type: on this machine those disagree and the driver is the
+    one that is wrong, so a block built from scan-type would greet you at the
+    lock screen with "Swipe finger to unlock" at a pad you cannot swipe.
+    """
     path = pathlib.Path(HYPRLOCK_CONF)
     try:
         text = path.read_text()
@@ -226,7 +458,7 @@ def hyprlock_set(enabled, scan_type):
         text = text[:i].rstrip("\n") + text[j:]
         text = text.rstrip("\n") + "\n"
     if enabled:
-        verb = "Swipe" if scan_type == "swipe" else "Scan"
+        verb = "Swipe" if gesture == "swipe" else "Touch"
         text = text.rstrip("\n") + f"""
 
 {HYPRLOCK_BEGIN}
@@ -297,6 +529,331 @@ def find_hwmon(name):
     return None
 
 
+def _log(message):
+    """Mirror the enrollment log to stderr with a timestamp.
+
+    The panel is launched by the systemd --user manager, so this lands in
+    `journalctl --user`. Worth the two lines: the first enrollment failure on
+    this machine had to be reconstructed from fprintd's own journal because the
+    panel kept its reasoning on screen and nowhere else.
+    """
+    print(f"[{time.strftime('%H:%M:%S')}] triton-panel/enroll: {message}",
+          file=sys.stderr, flush=True)
+
+
+def reader_usb() -> tuple:
+    """(vid:pid, power_control) for the USB fingerprint reader, or (None, None).
+
+    fprintd does not publish the USB id, and the panel needs it to recognise a
+    driver/sensor mismatch. Matched on the interface class rather than a
+    hardcoded bus path, which moves between boots.
+    """
+    for path in glob.glob("/sys/bus/usb/devices/*"):
+        product = read_text(os.path.join(path, "product"), "") or ""
+        if "fingerprint" not in product.lower():
+            continue
+        vid = read_text(os.path.join(path, "idVendor"), "")
+        pid = read_text(os.path.join(path, "idProduct"), "")
+        if not vid or not pid:
+            continue
+        return (f"{vid}:{pid}".lower(),
+                read_text(os.path.join(path, "power", "control"), None))
+    return None, None
+
+
+# --------------------------------------------------------------------------- #
+# Battery: the run, the draw, and the projection
+# --------------------------------------------------------------------------- #
+
+def human_duration(seconds):
+    """Seconds as "2 h 05 min" / "47 min". Zero-padded so it does not jiggle."""
+    seconds = int(max(0.0, seconds))
+    hours, rest = divmod(seconds, 3600)
+    minutes = rest // 60
+    return f"{hours} h {minutes:02d} min" if hours else f"{minutes} min"
+
+
+def upower_charge_history(direction, span=BATTERY_TRACE_SECONDS):
+    """The percent curve of the CURRENT run, oldest first, from upower.
+
+    Why upower at all, when every other number in this panel is read from
+    sysfs: sysfs has no past. This application is a window launched from
+    Walker, so its own trace begins empty at precisely the moment someone
+    opens it to ask how much battery has gone -- and the answer is in the two
+    hours before the window existed. upower keeps that curve in
+    /var/lib/upower across launches and is the only record of it. The live
+    sample stays on sysfs; upower is consulted once per run, for the history.
+
+    GetHistory("charge", span, points) answers a(udu) -- (unix time, percent,
+    state) -- NEWEST FIRST, with state from UPOWER_STATE. It also inserts
+    (timestamp, 0.0, 0) markers, state UNKNOWN at a zero percent, wherever it
+    lost track of the device, which on this machine means a suspend or an
+    upower restart. Those are discontinuities, so the walk backwards stops at
+    the first one: the readings on the far side belong to a stretch the
+    machine slept through, and stitching them in would draw a seven-hour flat
+    segment and then call it consumption. A real example from 2026-11-02:
+
+        (1793667268, 64.0, 2), (1793667268, 0.0, 0), (1793640616, 64.0, 2)
+
+    -- same 64%, 7.4 h apart, the machine asleep in between. The run that is
+    still going started at the marker, not at the earlier 64%.
+    """
+    state = UPOWER_STATE.get(direction)
+    if state is None:
+        return []
+    try:
+        proxy = Gio.DBusProxy.new_for_bus_sync(
+            Gio.BusType.SYSTEM, Gio.DBusProxyFlags.DO_NOT_LOAD_PROPERTIES, None,
+            UPOWER_NAME, UPOWER_DEVICE, UPOWER_NAME + ".Device", None,
+        )
+        reply = proxy.call_sync(
+            "GetHistory", GLib.Variant("(suu)", ("charge", int(span), 2048)),
+            Gio.DBusCallFlags.NONE, 4000, None,
+        )
+    except GLib.Error:
+        # upower absent, stopped, or refusing: the panel loses the stretch
+        # before it was opened and nothing else. Never fatal.
+        return []
+    return upower_points(reply.unpack()[0], state, time.time(), span)
+
+
+def upower_points(entries, state, now, span=BATTERY_TRACE_SECONDS):
+    """Walk one GetHistory answer back to the start of the current run.
+
+    Separate from the D-Bus call because this is the part with a judgement in
+    it -- where a run begins -- and the part a test can hand a recorded
+    history to (see test-battery.py, which replays the 2026-11-02 one).
+    """
+    points = []
+    for stamp, percent, kind in entries:
+        if kind != state:       # a transition or an UNKNOWN marker: run starts here
+            break
+        stamp = float(stamp)
+        if now - stamp > span:  # ordered, so everything past here is older still
+            break
+        if stamp > now + 60:    # clock skew; not a reading about this run
+            continue
+        points.append((stamp, float(percent)))
+    points.reverse()
+    return points
+
+
+class BatteryRun:
+    """The current discharge (or charge) run: its trace, its rate, its ETA.
+
+    One instance lives in the Sampler and is handed every sample. It owns the
+    three things a raw sysfs read cannot give:
+
+      * RUN SEGMENTATION. A run ends when the direction reverses, or at a
+        wall-clock hole (BATTERY_GAP_SECONDS -- i.e. a suspend). It does NOT
+        end when the status merely goes idle: "Not charging" is what this
+        machine reports all day with AC connected and the 80% cap holding, and
+        it is also what a brief blip looks like, so wiping the curve there
+        would throw away the discharge someone is looking at.
+      * THE RATE, smoothed, plus the run average as a cross-check.
+      * THE TRACE the graph draws, seeded from upower for the stretch that
+        happened before the panel opened.
+
+    Everything it returns is in the units the UI shows, and every field can be
+    None -- the panel runs with no battery fitted (as it did for three weeks in
+    October 2026) and with the DKMS cap module absent.
+    """
+
+    def __init__(self):
+        self.started = False
+        self.direction = None   # the RUN's direction: discharging / charging / None
+        self.live = None        # this sample's direction; None while idle
+        self.points = []        # [(wall time, percent)], oldest first
+        self.seeded = False     # upower supplied the part before the panel
+        self.ema_w = None
+        self.last_sample = None
+        self.gap = False        # this run began at a suspend hole
+
+    @staticmethod
+    def _direction(status):
+        """discharging / charging, or None for every idle status.
+
+        None covers "Not charging" (the 80% cap holding with AC on), "Full"
+        and "Unknown". Those are not directions and nothing can be projected
+        from them, but they are also not the end of a run.
+        """
+        status = (status or "").strip().lower()
+        if status == "discharging":
+            return "discharging"
+        if status == "charging":
+            return "charging"
+        return None
+
+    def _start(self, direction, now, percent, after_gap):
+        self.started = True
+        self.direction = direction
+        self.seeded = False
+        self.ema_w = None
+        self.gap = after_gap
+        self.points = []
+        # Always ask, including after a gap -- that is what makes a FALSE
+        # gap self-healing. A blocking call or an NTP step leaves no marker in
+        # upower's history, so it hands back the whole run and the trace is
+        # rebuilt instead of lost for the rest of the session; a real suspend
+        # does leave one (written at resume, sharing a timestamp with the last
+        # point before it), so the walk stops there and returns the stretch
+        # since waking, which is the only part worth drawing anyway.
+        if direction is not None:
+            self.points = upower_charge_history(direction)
+            self.seeded = bool(self.points)
+        self.points.append((now, percent))
+
+    def update(self, battery):
+        """Fold one sample in and return the projection state, or None."""
+        if battery is None or battery.get("percent") is None:
+            self.__init__()
+            return None
+
+        now = time.time()
+        percent = float(battery["percent"])
+        direction = self._direction(battery.get("status"))
+        gap = (self.last_sample is not None
+               and abs(now - self.last_sample) > BATTERY_GAP_SECONDS)
+        # A reversal only counts between two real directions. idle -> charging
+        # is the resumption of a run, not a new one.
+        reversed_ = (direction is not None and self.direction is not None
+                     and direction != self.direction)
+
+        if not self.started or gap or reversed_:
+            self._start(direction, now, percent, after_gap=gap)
+        else:
+            if direction is not None:
+                self.direction = direction
+            self._extend(now, percent)
+
+        if direction != self.live:
+            # Crossing into or out of idle: the samples before the crossing
+            # were measuring something else (0 W at the cap, or a charge
+            # current), so the EMA starts over rather than averaging the two.
+            self.ema_w = None
+        rate = self._rate(battery, now, direction)
+        self.live = direction
+        self.last_sample = now
+        return self._state(battery, now, percent, direction, rate)
+
+    # -- trace -------------------------------------------------------------- #
+
+    def _extend(self, now, percent):
+        """Append a point, or just move the last one forward.
+
+        Decimation that loses nothing: while the percentage holds, the final
+        point's timestamp is what advances, which extends the flat segment
+        instead of filling the list with identical samples. A six-hour
+        discharge therefore costs about eighty points, not ten thousand, and
+        the newest point is always the live reading.
+        """
+        if len(self.points) >= 2 and self.points[-1][1] == percent:
+            self.points[-1] = (now, percent)
+        else:
+            self.points.append((now, percent))
+        cutoff = now - BATTERY_TRACE_SECONDS
+        while len(self.points) > 2 and self.points[0][0] < cutoff:
+            self.points.pop(0)
+
+    # -- rate --------------------------------------------------------------- #
+
+    def _rate(self, battery, now, direction):
+        """The EMA of the instantaneous draw, in W. None while idle."""
+        if direction is None:
+            return None
+        instant = battery.get("power_w") or 0.0
+        if self.ema_w is None:
+            self.ema_w = instant
+            return self.ema_w
+        # dt-aware, so a missed tick (a slow sample, a resume) does not get
+        # the weight of a 2 s one.
+        elapsed = max(0.0, now - (self.last_sample or now))
+        if elapsed > 0.0:
+            alpha = 1.0 - math.exp(-min(elapsed, BATTERY_EMA_SECONDS * 4)
+                                   / BATTERY_EMA_SECONDS)
+            self.ema_w += alpha * (instant - self.ema_w)
+        return self.ema_w
+
+    def _average(self, now, wh_full):
+        """(W, seconds, delta percent) over the whole trace, or (None, ...).
+
+        Endpoints, not a fit: the trace is quantised to whole percent, so over
+        a short window a least-squares slope would be fitting the quantisation
+        and not the discharge. The gates below are what make the number mean
+        anything -- 2% over 10 minutes is the point where 1% of rounding stops
+        dominating the answer.
+        """
+        if len(self.points) < 2 or not wh_full:
+            return None, 0.0, 0.0
+        (t0, p0), (t1, p1) = self.points[0], self.points[-1]
+        span = t1 - t0
+        delta = p0 - p1
+        if span < BATTERY_AVG_MIN_SECONDS or abs(delta) < BATTERY_AVG_MIN_PERCENT:
+            return None, span, delta
+        return abs(delta) / 100.0 * wh_full / (span / 3600.0), span, delta
+
+    # -- the answer --------------------------------------------------------- #
+
+    def _state(self, battery, now, percent, direction, rate):
+        wh_now = battery.get("wh_now")
+        wh_full = battery.get("wh_full")
+        cap_on = battery.get("cap") == 1
+        start_time, start_percent = self.points[0]
+        average, span, delta = self._average(now, wh_full)
+
+        # Charging stops at the cap, so that -- not 100% -- is what a charge
+        # is projected to. charge_full is the right denominator here and
+        # charge_full_design is not: this pack reads 101.7 Wh full against a
+        # 100.0 Wh design, and a target above the real full would never arrive.
+        target = (80.0 if cap_on else 100.0) if direction == "charging" else 0.0
+
+        seconds = None
+        note = ""
+        if direction is None:
+            note = (f"{battery.get('status') or 'idle'} — held at the 80% cap"
+                    if cap_on and (battery.get("percent") or 0) >= 75
+                    else f"{battery.get('status') or 'idle'} — nothing to project")
+        elif rate is None or rate < BATTERY_RATE_FLOOR_W:
+            note = f"draw under {BATTERY_RATE_FLOOR_W:g} W — too small to divide by"
+        elif wh_now is None or wh_full is None:
+            note = "no voltage reading, so no energy figure"
+        elif direction == "discharging":
+            seconds = wh_now / rate * 3600.0
+        else:
+            remaining = (target - percent) / 100.0 * wh_full
+            if remaining <= 0.0:
+                note = f"already at the {target:.0f}% target"
+            else:
+                seconds = remaining / rate * 3600.0
+
+        over = seconds is not None and seconds > BATTERY_PROJECTION_MAX_SECONDS
+        return {
+            "direction": direction,
+            "status": battery.get("status"),
+            "percent": percent,
+            "wh_now": wh_now,
+            "wh_full": wh_full,
+            "used_wh_from_full": (wh_full - wh_now)
+                                 if (wh_full and wh_now is not None) else None,
+            "cap_on": cap_on,
+            "rate_w": rate,
+            "average_w": average,
+            "run_start": start_time,
+            "run_start_percent": start_percent,
+            "run_seconds": span,
+            "run_delta_percent": delta,
+            "seeded": self.seeded,
+            "after_gap": self.gap,
+            "target_percent": target,
+            "seconds_left": seconds,
+            "eta": (now + seconds) if seconds is not None else None,
+            "over": over,
+            "note": note,
+            "points": list(self.points),
+            "now": now,
+        }
+
+
 class Sampler:
     """One snapshot of the machine per call to `sample()`.
 
@@ -312,6 +869,9 @@ class Sampler:
         self._dgpu_last = None        # last live reading, reused between polls
         self._dgpu_last_poll = 0.0    # monotonic time of our last nvidia-smi
         self._dgpu_quiet_until = 0.0  # the loop must not touch the GPU before this
+        # Carries the battery trace, the drain EMA and the run segmentation
+        # across samples; see BatteryRun.
+        self._bat_run = BatteryRun()
 
     # -- chip lookup, revalidated cheaply ----------------------------------- #
 
@@ -455,6 +1015,16 @@ class Sampler:
             "power_w": abs(current) * voltage / 1e12,
             "health_percent": 100.0 * full / design if full and design else None,
             "wh_now": now * voltage / 1e12 if now and voltage else None,
+            # charge_full, NOT charge_full_design: this pack reads 101.7 Wh
+            # full against a 100.0 Wh design, and a charge projected to a
+            # target above the real full would never arrive.
+            #
+            # voltage_now, like wh_now above, so the two agree -- and so the
+            # voltage cancels in wh_now/power_w, leaving time-to-empty as the
+            # charge-over-current it really is. The cost is that both figures
+            # sag a watt-hour or two under load and read a little under
+            # upower's, which uses the design voltage.
+            "wh_full": full * voltage / 1e12 if full and voltage else None,
             # The cap lives on the DKMS module, not on BAT1.
             "cap": read_int(os.path.join(BATTERY_WMI, "health_mode")),
             "temp_c": (
@@ -557,6 +1127,11 @@ class Sampler:
         if dgpu and "temp_c" in dgpu:
             temps["dGPU"] = dgpu["temp_c"]
 
+        # Exactly once per sample: the run carries an EMA and a trace, so a
+        # second call here would fold the same tick in twice.
+        battery = self._battery()
+        battery_trend = self._bat_run.update(battery)
+
         return {
             "acer_available": acer is not None,
             "fans": fans,
@@ -566,7 +1141,8 @@ class Sampler:
             "memory": self._memory(),
             "igpu_mhz": igpu_mhz,
             "dgpu": dgpu,
-            "battery": self._battery(),
+            "battery": battery,
+            "battery_trend": battery_trend,
             "power": self._power_source(),
             "power_mode": self._power_mode(),
             "power_auto": self._power_auto_pref(),
@@ -733,10 +1309,1854 @@ FAN_COLOURS = {
     "Fan 2": (0.25, 0.72, 0.31),
 }
 
+class BatteryGraph(Gtk.DrawingArea):
+    """Charge over time, with the projection drawn on the SAME time axis.
+
+    The whole point of the picture is the join in the middle: the dashed line
+    is literally the solid line's current rate carried forward, so a
+    projection that disagrees with the slope you can see is a projection you
+    can catch. That only works on one linear axis -- putting history and
+    future side by side at different scales would make every slope look alike,
+    which is the usual way a battery widget manages to be both pretty and
+    useless.
+
+    y is pinned to 0-100%. The temperature graph autoscales because only the
+    variation matters there; here the floor IS the question, and autoscaling
+    would turn a 2% dip into a cliff and hide how far away empty is.
+
+    Colours are fixed RGB for the same reason as in Graph -- they have to read
+    on both libadwaita themes -- while the grid, the axis text and the "now"
+    line borrow the widget's own foreground so they follow the theme.
+    """
+
+    AXIS_WIDTH = 40
+    LEGEND_HEIGHT = 38      # two lines of text
+    FOOT_HEIGHT = 16        # the clock labels
+    LEVEL = (0.24, 0.68, 0.42)    # charge that is there
+    USED = (0.88, 0.56, 0.10)     # charge that has gone
+    FUTURE = (0.36, 0.60, 0.96)   # the projection
+
+    def __init__(self):
+        super().__init__()
+        self.state = None
+        self.set_content_height(188)
+        self.set_draw_func(self._draw)
+
+    def set_state(self, state):
+        self.state = state
+        self.queue_draw()
+
+    @staticmethod
+    def _time_step(span):
+        """A round clock step, so the labels are 23:00 / 23:30 / 00:00 rather
+        than whatever the span divides into."""
+        for step in (60, 120, 300, 600, 900, 1800, 3600, 7200, 10800, 21600):
+            if span / step <= 6:
+                return step
+        return 43200
+
+    @staticmethod
+    def _clock(stamp):
+        return time.strftime("%H:%M", time.localtime(stamp))
+
+    def _legend(self, state):
+        """(headline, detail). Two lines; the rows below the graph carry the
+        rest, so this says only what the picture needs to be readable."""
+        arrow = {"discharging": "↓", "charging": "↑"}.get(state["direction"], "=")
+        head = [f"{state['percent']:.0f}%"]
+        if state["rate_w"] is not None:
+            head.append(f"{arrow} {state['rate_w']:.1f} W")
+        if state["seconds_left"] is not None:
+            left = human_duration(state["seconds_left"])
+            head.append(f">{human_duration(BATTERY_PROJECTION_MAX_SECONDS)}"
+                        if state["over"] else
+                        (f"{left} left" if state["direction"] == "discharging"
+                         else f"{left} to {state['target_percent']:.0f}%"))
+
+        delta = state["run_delta_percent"]
+        detail = []
+        if abs(delta) >= 1.0:
+            moved = "used" if delta > 0 else "gained"
+            wh = abs(delta) / 100.0 * (state["wh_full"] or 0.0)
+            since = self._clock(state["run_start"])
+            detail.append(f"{moved} {abs(delta):.0f}% ({wh:.1f} Wh) since {since}"
+                          + (" (upower)" if state["seeded"] else ""))
+        if state["eta"] is not None and not state["over"]:
+            target = state["target_percent"]
+            label = ("empty" if state["direction"] == "discharging"
+                     else ("full" if target >= 100 else f"{target:.0f}%"))
+            detail.append(f"{label} ≈ {self._clock(state['eta'])}")
+        if state["average_w"] is not None:
+            detail.append(f"avg {state['average_w']:.1f} W")
+        if not detail and state["note"]:
+            detail.append(state["note"])
+        return "   ".join(head), "   ".join(detail)
+
+    def _draw(self, _area, cr, width, height):
+        fg = self.get_color()
+        cr.select_font_face("monospace")
+
+        def dim(alpha):
+            cr.set_source_rgba(fg.red, fg.green, fg.blue, alpha)
+
+        state = self.state
+        if state is None or not state.get("points"):
+            cr.set_font_size(11)
+            dim(0.5)
+            cr.move_to(8, height / 2)
+            cr.show_text("no battery")
+            return
+
+        now = state["now"]
+        percent = state["percent"]
+        left = state["seconds_left"]
+        # Clamped for DRAWING only; the slope is unchanged, the line just
+        # leaves the right-hand edge instead of compressing the history into
+        # a sliver because the laptop is idling at 3 W.
+        drawn = min(left, BATTERY_PROJECTION_MAX_SECONDS) if left else None
+        end_percent = (percent + (state["target_percent"] - percent) * (drawn / left)
+                       if drawn else percent)
+
+        t0 = min(state["run_start"], now - BATTERY_MIN_PAST_SECONDS)
+        t1 = max(now + (drawn or 0.0), now + BATTERY_MIN_FUTURE_SECONDS)
+        t1 += (t1 - t0) * 0.05   # the ETA must not sit on the frame
+        span = max(60.0, t1 - t0)
+
+        top = self.LEGEND_HEIGHT
+        plot_h = max(20.0, height - top - self.FOOT_HEIGHT)
+        plot_w = max(20.0, width - self.AXIS_WIDTH - 8)
+
+        def x_of(stamp):
+            return self.AXIS_WIDTH + plot_w * (stamp - t0) / span
+
+        def y_of(value):
+            return top + plot_h * (1.0 - max(0.0, min(100.0, value)) / 100.0)
+
+        # -- grid ----------------------------------------------------------- #
+        cr.set_font_size(11)
+        cr.set_line_width(1)
+        for value in (0, 20, 40, 60, 80, 100):
+            y = y_of(value)
+            dim(0.12)
+            cr.move_to(self.AXIS_WIDTH, y)
+            cr.line_to(width - 8, y)
+            cr.stroke()
+            dim(0.55)
+            cr.move_to(4, y + 4)
+            cr.show_text(f"{value:3d}%")
+
+        # The cap, when it is on: the ceiling a charge actually stops at, and
+        # the reason "time to full" here means "time to 80%".
+        if state["cap_on"]:
+            cr.set_source_rgba(*self.USED, 0.75)
+            cr.set_dash([3, 3])
+            cr.move_to(self.AXIS_WIDTH, y_of(80))
+            cr.line_to(width - 8, y_of(80))
+            cr.stroke()
+            cr.set_dash([])
+
+        points = [(x_of(stamp), y_of(value)) for stamp, value in state["points"]]
+
+        # -- what has been consumed ----------------------------------------- #
+        # The band between where the run started and where the charge is now.
+        # This is the "cuánta batería se ha consumido" half of the picture:
+        # its height is the answer and its width is how long it took.
+        base_y = y_of(state["run_start_percent"])
+        if abs(state["run_delta_percent"]) >= 0.5:
+            cr.move_to(points[0][0], base_y)
+            for x, y in points:
+                cr.line_to(x, y)
+            cr.line_to(points[-1][0], base_y)
+            cr.close_path()
+            band = self.USED if state["run_delta_percent"] > 0 else self.LEVEL
+            cr.set_source_rgba(*band, 0.30)
+            cr.fill()
+            dim(0.40)
+            cr.set_dash([2, 3])
+            cr.move_to(points[0][0], base_y)
+            cr.line_to(points[-1][0], base_y)
+            cr.stroke()
+            cr.set_dash([])
+
+        # -- the projection ------------------------------------------------- #
+        if drawn:
+            x_now, x_end = x_of(now), x_of(now + drawn)
+            cr.move_to(x_now, y_of(percent))
+            cr.line_to(x_end, y_of(end_percent))
+            cr.line_to(x_end, y_of(0))
+            cr.line_to(x_now, y_of(0))
+            cr.close_path()
+            cr.set_source_rgba(*self.FUTURE, 0.10)
+            cr.fill()
+
+            cr.set_source_rgba(*self.FUTURE, 0.95)
+            cr.set_line_width(1.6)
+            cr.set_dash([5, 4])
+            cr.move_to(x_now, y_of(percent))
+            cr.line_to(x_end, y_of(end_percent))
+            cr.stroke()
+            cr.set_dash([])
+
+        # -- the charge itself ---------------------------------------------- #
+        cr.set_source_rgb(*self.LEVEL)
+        cr.set_line_width(1.8)
+        cr.move_to(*points[0])
+        for x, y in points[1:]:
+            cr.line_to(x, y)
+        cr.stroke()
+
+        # -- now, and the clock axis ---------------------------------------- #
+        x_now = x_of(now)
+        dim(0.35)
+        cr.set_line_width(1)
+        cr.set_dash([2, 2])
+        cr.move_to(x_now, top)
+        cr.line_to(x_now, top + plot_h)
+        cr.stroke()
+        cr.set_dash([])
+
+        foot_y = top + plot_h + 12
+        taken = []
+
+        def place(stamp, text, keep):
+            """A clock label under `stamp`, centred, if it fits.
+
+            `keep` is for the ETA, which is the one label on this axis worth
+            the space: it is nudged back inside the widget rather than
+            dropped, and the tick drawn above it is what keeps it honest
+            about where it points. Every other label is simply skipped when
+            it would run off an edge or collide -- a half-drawn clock time is
+            worse than none.
+            """
+            extent = cr.text_extents(text)[4]
+            x = x_of(stamp) - extent / 2
+            if keep:
+                x = max(self.AXIS_WIDTH, min(x, width - 8 - extent))
+            elif x < self.AXIS_WIDTH or x + extent > width - 8:
+                return
+            if any(a < x + extent and x < b for a, b in taken):
+                return
+            cr.move_to(x, foot_y)
+            cr.show_text(text)
+            taken.append((x - 6, x + extent + 6))
+
+        if state["eta"] is not None and not state["over"]:
+            x_eta = x_of(state["eta"])
+            cr.set_source_rgba(*self.FUTURE, 0.95)
+            cr.set_line_width(1)
+            cr.move_to(x_eta, top + plot_h - 5)
+            cr.line_to(x_eta, top + plot_h + 3)
+            cr.stroke()
+            place(state["eta"], self._clock(state["eta"]), keep=True)
+
+        dim(0.45)
+        step = self._time_step(span)
+        stamp = math.ceil(t0 / step) * step
+        while stamp <= t1:
+            place(stamp, self._clock(stamp), keep=False)
+            stamp += step
+
+        # -- legend --------------------------------------------------------- #
+        head, detail = self._legend(state)
+        cr.set_font_size(13)
+        cr.set_source_rgb(fg.red, fg.green, fg.blue)
+        cr.move_to(self.AXIS_WIDTH, 15)
+        cr.show_text(head)
+        cr.set_font_size(11)
+        dim(0.6)
+        cr.move_to(self.AXIS_WIDTH, 31)
+        cr.show_text(detail)
+
 
 # --------------------------------------------------------------------------- #
 # Window
 # --------------------------------------------------------------------------- #
+
+# --------------------------------------------------------------------------- #
+# Enrollment UI
+# --------------------------------------------------------------------------- #
+
+class ContactStrip(Gtk.DrawingArea):
+    """A strip chart of the last seconds of `finger-present`, with each
+    enrollment result marked on the same timeline.
+
+    This is the instrument the enrollment window exists for. fprintd says a
+    stage was rejected but never says what the hand did; putting "the sensor
+    felt the finger for 0.18 s" next to "that one came back too short" is what
+    makes the gesture learnable instead of guesswork.
+
+    Deliberately carries NO target speed. The correct dwell for a given sensor
+    is not something this panel could honestly claim to know, so it measures
+    the user's own attempts and labels the ones that passed -- `last good`
+    below is observed, never a constant.
+
+    Degrades honestly: a reader that never reports finger-present says so,
+    rather than drawing an empty chart that would read as "your finger was
+    never detected".
+    """
+
+    WINDOW = 12.0          # seconds of history visible
+    HEIGHT = 92
+    PAD = 8
+
+    MARK_COLOURS = {
+        "stage": (0.25, 0.72, 0.31),
+        "done": (0.25, 0.72, 0.31),
+        # Calibration only: the capture reached the matcher and lost on score.
+        # Deliberately NOT amber -- amber means "change what your hand does",
+        # and this result is the one case where the hand did its job.
+        "scored": (0.33, 0.56, 0.90),
+        "gesture": (0.86, 0.60, 0.10),
+        "driver": (0.90, 0.33, 0.29),
+        "fatal": (0.90, 0.33, 0.29),
+    }
+
+    def __init__(self):
+        super().__init__()
+        self.set_content_height(self.HEIGHT)
+        self.set_hexpand(True)
+        # [start, end] in monotonic seconds; end is None while in contact.
+        self.contacts = []
+        self.marks = []            # (t, kind)
+        self.supported = None      # None = no property seen yet
+        self.last_good = None      # seconds of the last contact that passed
+        self.set_draw_func(self._draw)
+
+    def reset(self):
+        self.contacts.clear()
+        self.marks.clear()
+        self.last_good = None
+        self.queue_draw()
+
+    def set_present(self, present):
+        """Record a finger-present transition."""
+        self.supported = True
+        now = time.monotonic()
+        if present:
+            if not self.contacts or self.contacts[-1][1] is not None:
+                self.contacts.append([now, None])
+        elif self.contacts and self.contacts[-1][1] is None:
+            self.contacts[-1][1] = now
+        self.queue_draw()
+
+    def close_open_contact(self):
+        """Shut the current contact at this instant and return its length.
+
+        A result can arrive while the driver still reports the finger down, so
+        pairing must not wait for the off-transition that may never come.
+        """
+        if self.contacts and self.contacts[-1][1] is None:
+            self.contacts[-1][1] = time.monotonic()
+        if self.contacts:
+            start, end = self.contacts[-1]
+            return (end or time.monotonic()) - start
+        return None
+
+    def mark(self, kind, duration=None):
+        self.marks.append((time.monotonic(), kind))
+        if kind in ("stage", "done") and duration:
+            self.last_good = duration
+        self.queue_draw()
+
+    def _draw(self, _area, cr, width, height):
+        fg = self.get_color()
+        cr.select_font_face("monospace")
+        cr.set_font_size(11)
+
+        if self.supported is None and not self.contacts:
+            cr.set_source_rgba(fg.red, fg.green, fg.blue, 0.55)
+            cr.move_to(self.PAD, height / 2 + 4)
+            cr.show_text("waiting for the reader to report finger contact")
+            return
+
+        now = time.monotonic()
+        left, right = self.PAD, width - self.PAD
+        span = right - left
+        track_top, track_height = 30, 30
+
+        def x_of(t):
+            offset = (now - t) / self.WINDOW
+            return right - offset * span
+
+        # The track the contact blocks sit in.
+        cr.set_source_rgba(fg.red, fg.green, fg.blue, 0.10)
+        cr.rectangle(left, track_top, span, track_height)
+        cr.fill()
+
+        # One second grid, so a block's width is readable as a duration.
+        for step in range(1, int(self.WINDOW) + 1):
+            x = right - (step / self.WINDOW) * span
+            cr.set_source_rgba(fg.red, fg.green, fg.blue, 0.13)
+            cr.set_line_width(1)
+            cr.move_to(x, track_top)
+            cr.line_to(x, track_top + track_height)
+            cr.stroke()
+
+        # Contact blocks.
+        for start, end in self.contacts:
+            finish = end if end is not None else now
+            if finish < now - self.WINDOW:
+                continue
+            x0 = max(left, x_of(start))
+            x1 = min(right, x_of(finish))
+            if x1 - x0 < 1.5:
+                x1 = x0 + 1.5
+            live = end is None
+            cr.set_source_rgba(0.35, 0.65, 1.00, 0.95 if live else 0.75)
+            cr.rectangle(x0, track_top, x1 - x0, track_height)
+            cr.fill()
+
+        # Results, on the same time axis as the contact that produced them.
+        for t, kind in self.marks:
+            if t < now - self.WINDOW:
+                continue
+            x = x_of(t)
+            red, green, blue = self.MARK_COLOURS.get(kind, (0.6, 0.6, 0.6))
+            cr.set_source_rgb(red, green, blue)
+            cr.set_line_width(2)
+            cr.move_to(x, track_top - 6)
+            cr.line_to(x, track_top + track_height + 6)
+            cr.stroke()
+            cr.arc(x, track_top - 9, 3, 0, 2 * math.pi)
+            cr.fill()
+
+        # Readout: the live or last contact, and the last one that counted.
+        if self.contacts:
+            start, end = self.contacts[-1]
+            length = (end if end is not None else now) - start
+            label = f"{'holding' if end is None else 'last contact'} {length:5.2f}s"
+        else:
+            label = "no contact yet"
+        cr.set_source_rgba(fg.red, fg.green, fg.blue, 0.85)
+        cr.move_to(left, 16)
+        cr.show_text(label)
+
+        if self.last_good:
+            text = f"last accepted {self.last_good:.2f}s"
+            cr.set_source_rgb(0.25, 0.72, 0.31)
+            cr.move_to(right - cr.text_extents(text).width, 16)
+            cr.show_text(text)
+
+        cr.set_source_rgba(fg.red, fg.green, fg.blue, 0.45)
+        cr.move_to(left, height - 4)
+        cr.show_text(f"{int(self.WINDOW)}s ago")
+        text = "now"
+        cr.move_to(right - cr.text_extents(text).width, height - 4)
+        cr.show_text(text)
+
+
+class StageDots(Gtk.DrawingArea):
+    """`stages` pills, filled as stages pass. Driven only by
+    enroll-stage-passed, never by a retry: a rejected attempt genuinely does
+    not advance the counter, and showing otherwise would be a lie that makes
+    the next failure baffling."""
+
+    HEIGHT = 22
+
+    def __init__(self):
+        super().__init__()
+        self.set_content_height(self.HEIGHT)
+        self.set_hexpand(True)
+        self.stages = 0
+        self.passed = 0
+        self.set_draw_func(self._draw)
+
+    def configure(self, stages):
+        self.stages = max(0, int(stages or 0))
+        self.passed = 0
+        self.queue_draw()
+
+    def set_passed(self, passed):
+        self.passed = passed
+        self.queue_draw()
+
+    def _draw(self, _area, cr, width, height):
+        if self.stages <= 0:
+            return
+        gap = 6
+        pill = (width - gap * (self.stages - 1)) / self.stages
+        fg = self.get_color()
+        for index in range(self.stages):
+            x = index * (pill + gap)
+            if index < self.passed:
+                cr.set_source_rgb(0.25, 0.72, 0.31)
+            else:
+                cr.set_source_rgba(fg.red, fg.green, fg.blue, 0.16)
+            radius = height / 2
+            cr.new_sub_path()
+            cr.arc(x + radius, height / 2, radius, math.pi / 2, 3 * math.pi / 2)
+            cr.arc(x + pill - radius, height / 2, radius, 3 * math.pi / 2, math.pi / 2)
+            cr.close_path()
+            cr.fill()
+
+
+class EnrollWindow(Adw.Window):
+    """The enrollment flow, in a window of its own.
+
+    Why a separate window rather than more rows in the Fingerprint group: this
+    is a live interaction that takes many attempts, during which the user is
+    looking at their hand and the sensor, not at a settings list. The first
+    version reported all of it through one subtitle on a combo row, which is
+    how every attempt across three sessions on this machine could fail without
+    leaving anything to go on -- the diagnosis had to come from fprintd's own
+    journal instead.
+
+    It owns the claim for its whole lifetime. Claim -> EnrollStart ->
+    EnrollStop -> Release, and the release runs on EVERY exit path including
+    close-request, because a claim left behind means the next Super+L has no
+    fingerprint until fprintd times it out.
+
+    Claim is the one async call here. It raises a polkit prompt and blocks for
+    as long as the human takes to type a password; doing it synchronously froze
+    the window before it had painted a single frame.
+    """
+
+    TICK_MS = 50     # 20 fps, only while an enrollment is running
+
+    # A driver fault arrives as a TERMINAL EnrollStatus: fprintd has ended the
+    # enrollment, though the claim is still ours. The window restarts it
+    # itself rather than sending the user back through polkit, because on this
+    # machine that fault lands every few captures and re-authorizing each time
+    # is what made a session unworkable. Two caps, for the two shapes seen in
+    # `journalctl -u fprintd`:
+    #
+    #   MAX_DRY_RESTARTS -- a wedged USB endpoint emits the fault back to back
+    #       with no finger contact in between. Restarting into that is a spin,
+    #       so consecutive restarts with no contact between them are counted
+    #       and stop it. (Recovery is ./fp-debug.sh rebind.)
+    #   MAX_RESTARTS     -- a hard ceiling, so an unattended window cannot
+    #       loop for an hour.
+    MAX_RESTARTS = 15
+    MAX_DRY_RESTARTS = 3
+
+    # -- calibration gate ---------------------------------------------------- #
+    #
+    # Added 2026-11-01. Enrolment can pass 6/6 and still produce a template
+    # that never matches (§20m), so this window no longer treats "enrolled" as
+    # the goal. It measures MATCHING first, with verify -- which writes
+    # nothing -- and only then offers to re-enrol.
+    #
+    # The gate: at least CAL_MIN attempts, and at least CAL_REQUIRED of the
+    # last CAL_WINDOW reaching the matcher. A rolling window, not a total, so
+    # the score reflects the placement the user has CONVERGED on rather than
+    # being dragged down forever by the fumbling at the start -- the whole
+    # point is to find a repeatable placement and then enrol from it.
+    #
+    # Not configurable. A knob here would invite tuning the threshold until it
+    # passes, which is the one thing that would make the measurement useless.
+    CAL_WINDOW = 10
+    CAL_REQUIRED = 8
+    CAL_MIN = 10
+
+    # -- what each stage should capture ------------------------------------- #
+    #
+    # Corrected 2026-11-01 (§20q), and it REVERSES what this window used to
+    # say. An enrolled NBIS print is a GPtrArray of per-stage minutiae sets --
+    # FpPrint exposes it as `fpi-prints`, plural, and `fpi_print_add_print`
+    # appends one per stage -- and `fpi_print_bz3_match` loops over EVERY
+    # stored set, returning success on the FIRST one scoring at or above the
+    # bz3 threshold (default 40). That is a one-of-N match, not a composite.
+    #
+    # So six identical placements store six near-duplicates and waste five of
+    # the six slots, while six DIFFERENT regions give six independent chances
+    # for a single verify capture to overlap one of them. On a ~1 cm pad,
+    # where no one capture holds much of the finger, that is the difference
+    # between a template that can be matched and one that cannot. It is also
+    # why phone enrolment asks you to shift the finger and then do the edges.
+    #
+    # The window used to say to use the SAME placement on every stage. That
+    # conflated two different things: the `elan` driver stitching FRAMES by
+    # displacement WITHIN one capture (§20j) with how libfprint stores stages
+    # ACROSS an enrolment. The first is real; the second is not stitching.
+    ENROLL_REGIONS = [
+        "the centre of your fingertip",
+        "a little HIGHER, nearer the tip",
+        "a little LOWER, nearer the first joint",
+        "rolled slightly LEFT",
+        "rolled slightly RIGHT",
+        "the centre again, held a touch longer",
+    ]
+
+    # A calibration run is a deliberate loop, so it has no restart ceiling --
+    # the user stops it when they are done. But a wedged endpoint faults back
+    # to back with nothing touching the pad, and looping into that is a spin,
+    # so consecutive driver faults with no contact between them still stop it.
+    MAX_CAL_DRY = 4
+
+    # -- what counts as one measurement ------------------------------------ #
+    #
+    # Two decisions were coupled in the first version of this (§20r) and they
+    # have OPPOSITE failure modes:
+    #
+    #   * miss a COUNT  -> the measurement is wrong, which is recoverable.
+    #   * miss a RE-ARM -> the device is not listening, so the user's touch is
+    #                      lost entirely and the hardware looks broken.
+    #
+    # §20r made the re-arm wait for the lift, so the panel went deaf for up to
+    # three seconds after every result. The journals tell the story: before,
+    # events every 1-3 s with `No minutiae found` interleaved; after, gaps of
+    # 3/4/5/13/14 s and ONE `No minutiae found` in 45 s. Touches were landing
+    # in the blackout. Fixed in §20s: the verify is ALWAYS re-armed at once,
+    # and the lift gate decides only whether a result is COUNTED.
+    #
+    # Deciding "is this a new press?" cannot use the strip's open contact,
+    # because `close_open_contact()` shuts it artificially on every result --
+    # the same trap that made a dozen results from one press each show a
+    # plausible duration. It uses instead:
+    #
+    #   * any finger-present TRANSITION since the last counted result. A new
+    #     press must be detected to be captured at all, so the ON edge is the
+    #     best evidence available that something moved.
+    #   * failing that, a wall-clock escape: a result arriving this long after
+    #     the last counted one is counted regardless, so an unreliable
+    #     finger-present (this driver emits an INVALID off-transition, §20j)
+    #     can never suppress the measurement forever.
+    SAME_PRESS_S = 2.0
+
+    def __init__(self, parent, finger, label):
+        super().__init__(
+            transient_for=parent,
+            modal=True,
+            title=f"Enroll — {label}",
+            default_width=620,
+            default_height=760,
+        )
+        self.parent = parent
+        self.device = parent.fp_device
+        self.info = parent.fp_info or {}
+        self.finger = finger
+        self.label = label
+
+        self.stages = self.info.get("stages") or 0
+        self.passed = 0
+        self.attempts = 0
+        self.tally = {}
+        self.running = False
+        self.completed = False
+        self._signal_handler = None
+        self._props_handler = None
+        self._tick_id = None
+        self._saw_contact = False
+        self.restarts = 0
+        self._dry_restarts = 0
+        self._contact_since_restart = False
+        self._restart_block = None
+
+        # -- calibration state ---------------------------------------------- #
+        # phase is what the claim is currently being used for, and what _stop
+        # has to stop: "idle" | "calibrate" | "enroll".
+        self.phase = "idle"
+        self._pending_phase = None
+        self.cal_log = []        # one bool per attempt: did it reach the matcher
+        self.cal_tally = {}
+        self.cal_attempts = 0
+        self.cal_matched = 0
+        self._cal_dry = 0
+        self._cal_contact = False
+        self.calibrated = False
+        # Has the finger come OFF since the last counted attempt? True to
+        # start, so the first touch of a run counts.
+        self._lifted = True
+        self._presence_changes = 0
+        self._last_counted_at = 0.0
+        self._cal_noted_no_lift = False
+        self._cal_suppressed = 0
+        # Which operation the claim was last used for, and whether the claim
+        # has already been given back. Without these a second _stop() asks
+        # fprintd to EnrollStop/Release a device it no longer holds, which it
+        # logs as "Device was not claimed before use" -- a line that reads
+        # exactly like a claim leak and is not one.
+        self._last_phase = None
+        self._released = False
+
+        # Whether the chosen slot already holds a print. Enrolling into an
+        # occupied slot OVERWRITES it, and the print on this machine took
+        # three sessions to get, so the window says so instead of discovering
+        # it afterwards.
+        self.slot_taken = finger in (getattr(parent, "_fp_fingers", None) or [])
+
+        # Set the moment the window starts going away, so the async Claim
+        # callback can tell it is arriving into a dead window.
+        self._closed = False
+
+        self.usb_id, self.usb_power = reader_usb()
+        self._build()
+        self.connect("close-request", self._on_close_request)
+
+    # -- construction ------------------------------------------------------- #
+
+    def _build(self):
+        self.toasts = Adw.ToastOverlay()
+        bars = Adw.ToolbarView()
+        bars.add_top_bar(Adw.HeaderBar())
+
+        body = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=14)
+        body.set_margin_top(14)
+        body.set_margin_bottom(14)
+        body.set_margin_start(14)
+        body.set_margin_end(14)
+
+        # A driver/sensor mismatch is not the user's problem to solve, so it is
+        # said once, up front, instead of being discovered after twenty swipes.
+        # No pre-emptive "known driver problem" banner. It used to warn that
+        # enrolment "may fail with a driver fault no gesture can fix" -- which
+        # 2026-11-01 disproved: 6/6 with two rejections and zero protocol
+        # errors, once the instructions matched the pad. The protocol errors
+        # are intermittent, not blocking, and a standing warning about them
+        # told the user nothing they could act on. Per-result reporting in
+        # _handle_result already says whose problem each attempt was.
+
+        # The status line is the window's headline and belongs to whichever
+        # phase is running, so it sits ABOVE everything rather than inside a
+        # card. It used to live in the Stages card, which is how adding the
+        # calibration phase left that card inert and full of calibration text
+        # -- see §20o's defect note.
+        body.append(self._status_box())
+        body.append(self._card("Finger contact", self._contact_card()))
+        body.append(self._card("Placement calibration", self._calibration_card()))
+        body.append(self._progress_card())
+        body.append(self._card("Live reader state", self._live_card()))
+        body.append(self._guide())
+        body.append(self._card("Attempts", self._log_card()))
+
+        scroller = Gtk.ScrolledWindow(hscrollbar_policy=Gtk.PolicyType.NEVER)
+        scroller.set_child(body)
+        scroller.set_vexpand(True)
+        bars.set_content(scroller)
+
+        bottom = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        bottom.set_margin_top(8)
+        bottom.set_margin_bottom(8)
+        bottom.set_margin_start(12)
+        bottom.set_margin_end(12)
+        # Calibrate is the suggested action, not enrol: measuring is what you
+        # should do first and it is the one that cannot damage anything.
+        self.cal_button = Gtk.Button(label="Calibrate placement")
+        self.cal_button.add_css_class("suggested-action")
+        self.cal_button.connect("clicked", self._on_calibrate)
+        self.start_button = Gtk.Button(label="Enroll anyway")
+        self.start_button.connect("clicked", self._on_start)
+        self.stop_button = Gtk.Button(label="Stop")
+        self.stop_button.set_sensitive(False)
+        self.stop_button.connect("clicked", self._on_stop_clicked)
+        spacer = Gtk.Box()
+        spacer.set_hexpand(True)
+        close = Gtk.Button(label="Close")
+        close.connect("clicked", lambda _b: self.close())
+        for widget in (self.cal_button, self.start_button, self.stop_button,
+                       spacer, close):
+            bottom.append(widget)
+        bars.add_bottom_bar(bottom)
+
+        self.toasts.set_child(bars)
+        self.set_content(self.toasts)
+        # Both of these paint widgets built above, so they run last: _update_cal
+        # needs the buttons, _set_idle_text needs stages_note.
+        self._update_cal()
+        self._set_idle_text()
+
+    @staticmethod
+    def _card(title, child):
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
+        heading = Gtk.Label(label=title, xalign=0.0)
+        heading.add_css_class("heading")
+        box.append(heading)
+        frame = Adw.Bin()
+        frame.add_css_class("card")
+        inner = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
+        inner.set_margin_top(10)
+        inner.set_margin_bottom(10)
+        inner.set_margin_start(10)
+        inner.set_margin_end(10)
+        inner.append(child)
+        frame.set_child(inner)
+        box.append(frame)
+        return box
+
+    def _contact_card(self):
+        self.strip = ContactStrip()
+        return self.strip
+
+    def _calibration_card(self):
+        """Measure matching before touching the stored print.
+
+        This card is the answer to the failure mode of 2026-11-01: a 6/6
+        enrolment whose template then matched nothing, with every number in
+        this window still reading as success. Enrolment signals cannot see
+        that; only verify can.
+        """
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
+
+        self.cal_status = Gtk.Label(xalign=0.0, wrap=True)
+        self.cal_status.add_css_class("title-4")
+        box.append(self.cal_status)
+
+        self.cal_meter = Gtk.Label(xalign=0.0, wrap=True)
+        self.cal_meter.add_css_class("numeric")
+        box.append(self.cal_meter)
+
+        self.cal_detail = Gtk.Label(xalign=0.0, wrap=True)
+        self.cal_detail.add_css_class("dim-label")
+        box.append(self.cal_detail)
+
+        # The per-result breakdown. It was being collected into cal_tally
+        # from the first version and rendered nowhere -- the Stages card's
+        # tally_label reads the ENROLMENT tally, so during calibration it
+        # stayed empty. Part of the same §20o defect.
+        self.cal_tally_label = Gtk.Label(xalign=0.0, wrap=True)
+        self.cal_tally_label.add_css_class("dim-label")
+        self.cal_tally_label.add_css_class("caption")
+        box.append(self.cal_tally_label)
+
+        self.cal_note = Gtk.Label(xalign=0.0, wrap=True)
+        self.cal_note.add_css_class("dim-label")
+        self.cal_note.add_css_class("caption")
+        self.cal_note.set_text(
+            "Calibration runs verify against the print already stored. It "
+            "enrolls nothing, deletes nothing and writes nothing, so it is "
+            "safe to repeat. \"Scored\" means the sensor got readable ridges "
+            "and the matcher ran -- it is evidence about your placement, not "
+            "a quality score for the image; only ./fp-debug.sh verify prints "
+            "the underlying minutiae count."
+        )
+        box.append(self.cal_note)
+
+        if self.slot_taken:
+            warn = Gtk.Label(xalign=0.0, wrap=True)
+            warn.add_css_class("warning")
+            warn.set_text(
+                f"\u26a0 {self.label} already holds a print. Enrolling into "
+                "this slot OVERWRITES it. To keep it, close this window and "
+                "pick a finger with no print -- the slot name is only a "
+                "label, so a free slot can hold the same physical finger."
+            )
+            box.append(warn)
+
+        # NOT _update_cal() here: this card is built before the bottom bar, so
+        # cal_button/start_button do not exist yet. _build() paints it once
+        # everything is constructed.
+        return box
+
+    def _update_cal_tally(self):
+        if not self.cal_tally:
+            self.cal_tally_label.set_text("")
+            return
+        parts = [f"{count}x {name}" for name, count in
+                 sorted(self.cal_tally.items(), key=lambda kv: -kv[1])]
+        self.cal_tally_label.set_text(
+            f"{self.cal_attempts} attempts · " + " · ".join(parts))
+
+    def _cal_gate(self):
+        """(ready, scored_recent, window_size). Rolling, not cumulative."""
+        recent = self.cal_log[-self.CAL_WINDOW:]
+        scored = sum(1 for ok in recent if ok)
+        ready = (len(self.cal_log) >= self.CAL_MIN
+                 and scored >= self.CAL_REQUIRED)
+        return ready, scored, len(recent)
+
+    def _update_cal(self):
+        ready, scored, window = self._cal_gate()
+        self.calibrated = ready
+
+        if not self.cal_log and self.phase != "calibrate":
+            self.cal_status.set_text("Not measured")
+            self.cal_meter.set_text("")
+            self.cal_detail.set_text(
+                "Press Calibrate placement. Touch the pad the same way you "
+                f"would to unlock, {self.CAL_MIN}+ times, and this will show "
+                "whether the sensor is giving the matcher anything to work "
+                "with."
+            )
+        else:
+            bar = "".join("\u25cf" if ok else "\u25cb"
+                          for ok in self.cal_log[-self.CAL_WINDOW:])
+            self.cal_meter.set_text(
+                f"{bar}   {scored}/{window} scored"
+                + (f"   ({self.cal_matched} matched)" if self.cal_matched else "")
+            )
+            if self.cal_matched:
+                self.cal_status.set_text("Matching works")
+                self.cal_detail.set_text(
+                    f"{self.cal_matched} of {self.cal_attempts} attempts "
+                    "matched the stored print, so there is nothing to "
+                    "re-enroll for. A match is what hyprlock waits for at the "
+                    "lock screen -- this measured fprintd's answer, not "
+                    "hyprlock's, but they drive the same verify."
+                )
+            elif ready:
+                self.cal_status.set_text("Calibrated \u2014 and nothing matched")
+                self.cal_detail.set_text(
+                    f"{scored} of the last {window} captures reached the "
+                    "matcher, so your placement is delivering readable "
+                    "ridges, and none of them matched the stored print. That "
+                    "points at the TEMPLATE, not your hand: re-enrolling is "
+                    "worth doing. Enrol AROUND this placement: the same "
+                    "quality of contact, a different part of the finger each "
+                    "stage, since any one stage matching is enough to unlock."
+                )
+            elif len(self.cal_log) < self.CAL_MIN:
+                self.cal_status.set_text("Measuring\u2026")
+                self.cal_detail.set_text(
+                    f"{len(self.cal_log)} of {self.CAL_MIN} attempts needed "
+                    "before this means anything. Same spot, flat, centred, "
+                    "still until the result appears, then lift clear."
+                )
+            else:
+                self.cal_status.set_text("Captures are too thin")
+                self.cal_detail.set_text(
+                    f"Only {scored} of the last {window} reached the matcher "
+                    f"({self.CAL_REQUIRED} needed). Either the placement is "
+                    "not repeatable yet, or this is the small-sensor ceiling. "
+                    "Re-enrolling from captures this thin would just build "
+                    "another template that cannot be matched -- keep "
+                    "adjusting, and if it will not come up, run "
+                    "./fp-debug.sh verify for the minutiae counts."
+                )
+
+        # Guarded: _update_cal is reachable from the card constructor in any
+        # future reorder of _build, and the buttons are made after the cards.
+        start = getattr(self, "start_button", None)
+        cal = getattr(self, "cal_button", None)
+        if self.phase == "idle" and start is not None and cal is not None:
+            start.set_label("Enroll now" if ready else "Enroll anyway")
+            if ready:
+                start.add_css_class("suggested-action")
+                cal.remove_css_class("suggested-action")
+            else:
+                start.remove_css_class("suggested-action")
+                cal.add_css_class("suggested-action")
+
+    def _status_box(self):
+        """The window's one status line, shared by both phases.
+
+        Owned by whichever phase is running. Keeping it out of a card is the
+        point: when it lived inside the one titled "Stages", a calibration
+        retry message ("the capture had no readable ridges") rendered under a
+        heading about enrolment stages, and the Stages card itself sat frozen
+        at 0 / 6 looking broken.
+        """
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
+        self.status_label = Gtk.Label(xalign=0.0, wrap=True)
+        self.status_label.add_css_class("title-4")
+        box.append(self.status_label)
+        self.hint_label = Gtk.Label(xalign=0.0, wrap=True)
+        self.hint_label.add_css_class("dim-label")
+        box.append(self.hint_label)
+        return box
+
+    def _progress_card(self):
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
+
+        head = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        heading = Gtk.Label(label="Stages", xalign=0.0)
+        heading.add_css_class("heading")
+        heading.set_hexpand(True)
+        self.count_label = Gtk.Label(xalign=1.0)
+        self.count_label.add_css_class("numeric")
+        self.count_label.add_css_class("dim-label")
+        head.append(heading)
+        head.append(self.count_label)
+        box.append(head)
+
+        self.dots = StageDots()
+        self.dots.configure(self.stages)
+        box.append(self.dots)
+
+        # Says why the pills are not moving, instead of leaving the card to
+        # read as broken whenever an enrollment is not the thing running.
+        self.stages_note = Gtk.Label(xalign=0.0, wrap=True)
+        self.stages_note.add_css_class("dim-label")
+        self.stages_note.add_css_class("caption")
+        box.append(self.stages_note)
+
+        self.tally_label = Gtk.Label(xalign=0.0, wrap=True)
+        self.tally_label.add_css_class("dim-label")
+        self.tally_label.add_css_class("caption")
+        box.append(self.tally_label)
+
+        return box
+
+    def _live_card(self):
+        grid = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
+        self.present_label = Gtk.Label(xalign=0.0)
+        self.needed_label = Gtk.Label(xalign=0.0)
+        self.device_label = Gtk.Label(xalign=0.0, wrap=True)
+        self.device_label.add_css_class("dim-label")
+        self.device_label.add_css_class("caption")
+        for widget in (self.present_label, self.needed_label, self.device_label):
+            grid.append(widget)
+        self._render_live(None, None)
+        detail = f"{self.info.get('name', 'reader')} · {self.info.get('scan_type', '?')}"
+        if self.info.get("driver_scan_type_wrong"):
+            detail += f" (driver's claim; the pad is {self.info['gesture']})"
+        if self.usb_id:
+            detail += f" · {self.usb_id}"
+        if self.usb_power:
+            detail += f" · USB power/control={self.usb_power}"
+        self.device_label.set_text(detail)
+        return grid
+
+    def _guide(self):
+        expander = Gtk.Expander(label="How this works")
+        swipe = self.info.get("gesture") == "swipe"
+        stages = self.stages or "several"
+        header = (f"This reader needs {stages} accepted captures. The driver "
+                  f"declares it a {self.info.get('scan_type', '?')} sensor")
+        if self.info.get("driver_scan_type_wrong"):
+            header += (", and that is wrong: the part in this chassis is a "
+                       "small square pad in the corner of the touchpad, with "
+                       "nothing to slide a finger along. What follows "
+                       "describes the pad, not the driver")
+        text = (
+            header + ".\n\n"
+            + ("Slide the finger across the sensor in one continuous motion. "
+               "The driver stitches a series of frames together as the finger "
+               "moves, so a tap produces too few frames to assemble.\n\n"
+               "Then lift the finger right off before the next one. libfprint "
+               "will not start a capture until the driver has reported the "
+               "finger gone, so a finger left resting there stalls the run "
+               "silently.\n\n"
+               if swipe else
+               "Place the finger flat on the sensor, covering as much of it "
+               "as you can, hold still until the result appears, then lift it "
+               "off completely before the next capture.\n\n"
+               "That last step is not optional: libfprint will not begin the "
+               "next capture until the driver has reported the finger gone, "
+               "so a finger left resting on the pad stalls the run with no "
+               "message at all.\n\n")
+            + f"A rejected attempt does NOT advance the counter, so reaching "
+              f"{stages} of {stages} can take more tries than that. The strip "
+              "at the top shows how long the sensor actually felt your finger "
+              "on each attempt, with a green mark where one was accepted and "
+              "an amber or red mark where it was not — compare the widths to "
+              "find what works on your hand.\n\n"
+            "Amber marks are gestures you can change. Red marks are the driver "
+            "failing to talk to the sensor, which no gesture will fix."
+        )
+        label = Gtk.Label(label=text, xalign=0.0, wrap=True)
+        label.add_css_class("dim-label")
+        label.set_margin_top(8)
+        label.set_margin_start(4)
+        label.set_margin_end(4)
+        expander.set_child(label)
+        return expander
+
+    def _log_card(self):
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
+        self.log_list = Gtk.ListBox()
+        self.log_list.add_css_class("boxed-list")
+        self.log_list.set_selection_mode(Gtk.SelectionMode.NONE)
+        placeholder = Gtk.Label(label="Nothing yet", xalign=0.0)
+        placeholder.add_css_class("dim-label")
+        placeholder.set_margin_top(8)
+        placeholder.set_margin_bottom(8)
+        self.log_list.set_placeholder(placeholder)
+        scroller = Gtk.ScrolledWindow(hscrollbar_policy=Gtk.PolicyType.NEVER)
+        scroller.set_min_content_height(150)
+        scroller.set_child(self.log_list)
+        box.append(scroller)
+        return box
+
+    # -- small renderers ---------------------------------------------------- #
+
+    def _set_idle_text(self):
+        self.count_label.set_text(f"\u2014 / {self.stages or '?'}")
+        self.status_label.set_text("Ready when you are")
+        # Names the buttons that exist. It used to say "Press Start", which was
+        # the button's name before calibration split it into two.
+        self.hint_label.set_text(
+            "Press Calibrate placement first — it measures whether a "
+            "stored print can be matched at all, and writes nothing. Enroll "
+            "once it says your placement is scoring."
+        )
+        self.tally_label.set_text("")
+        self._set_stages_note()
+
+    def _set_stages_note(self):
+        """Why the stage pills are or are not moving, in one line."""
+        if self.phase == "enroll":
+            self.stages_note.set_text("")
+        elif self.completed or self.passed:
+            self.stages_note.set_text("")
+        elif self.phase == "calibrate":
+            self.stages_note.set_text(
+                "Not in use — calibration measures matching and captures "
+                "no stages. These fill in during enrolment.")
+        else:
+            self.stages_note.set_text(
+                "One pill per accepted capture; they fill in during "
+                "enrolment.")
+
+    def _render_live(self, present, needed):
+        def dot(value, yes, no, unknown):
+            if value is None:
+                return f"○  {unknown}"
+            return f"●  {yes}" if value else f"○  {no}"
+
+        self.present_label.set_text(
+            dot(present, "Finger on the sensor", "No finger on the sensor",
+                "Finger contact: not reported yet"))
+        self.needed_label.set_text(
+            dot(needed, "Reader is waiting for a finger", "Reader is not asking "
+                "for a finger", "Reader state: not reported yet"))
+
+    def _toast(self, message, timeout=5):
+        toast = Adw.Toast(title=message)
+        toast.set_timeout(timeout)
+        self.toasts.add_toast(toast)
+
+    def _add_log(self, kind, title, detail):
+        icons = {"stage": "✓", "done": "✓", "gesture": "!",
+                 "scored": "◐", "driver": "✗", "fatal": "✗",
+                 "info": "·"}
+        css = {"stage": "success", "done": "success", "gesture": "warning",
+               "scored": "accent", "driver": "error", "fatal": "error"}
+        row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
+        row.set_margin_top(7)
+        row.set_margin_bottom(7)
+        row.set_margin_start(10)
+        row.set_margin_end(10)
+
+        stamp = Gtk.Label(label=time.strftime("%H:%M:%S"), xalign=0.0)
+        stamp.add_css_class("dim-label")
+        stamp.add_css_class("numeric")
+        mark = Gtk.Label(label=icons.get(kind, "·"))
+        if kind in css:
+            mark.add_css_class(css[kind])
+        text = Gtk.Label(label=title if not detail else f"{title} — {detail}",
+                         xalign=0.0, wrap=True)
+        text.set_hexpand(True)
+        for widget in (stamp, mark, text):
+            row.append(widget)
+        self.log_list.prepend(row)
+        _log(f"{kind}: {title}{(' — ' + detail) if detail else ''}")
+
+    def _update_tally(self):
+        if not self.tally:
+            self.tally_label.set_text("")
+            return
+        parts = [f"{count}x {name}" for name, count in
+                 sorted(self.tally.items(), key=lambda kv: -kv[1])]
+        prefix = f"{self.attempts} attempts"
+        if self.restarts:
+            prefix += (f" · {self.restarts} restart"
+                       f"{'s' if self.restarts != 1 else ''}")
+        self.tally_label.set_text(prefix + " · " + " · ".join(parts))
+
+    # -- the enrollment ----------------------------------------------------- #
+
+    def _stages_now(self):
+        """num-enroll-stages straight off the bus.
+
+        The spec says this property is only defined once the device has been
+        claimed, so it is re-read here rather than trusted from the unclaimed
+        cache. An explicit Properties.Get, not get_cached_property: the
+        PropertiesChanged that the claim triggers has not necessarily been
+        dispatched by the time the synchronous Claim call returns.
+        """
+        try:
+            value = self.device.get_connection().call_sync(
+                FPRINT_NAME, self.device.get_object_path(),
+                "org.freedesktop.DBus.Properties", "Get",
+                GLib.Variant("(ss)", (FPRINT_NAME + ".Device",
+                                      "num-enroll-stages")),
+                GLib.VariantType("(v)"), Gio.DBusCallFlags.NONE, 5000, None,
+            ).unpack()[0]
+            return int(value) if int(value) > 0 else 0
+        except (GLib.Error, TypeError, ValueError, AttributeError):
+            return 0
+
+    def _on_calibrate(self, _button):
+        self._claim_for("calibrate")
+
+    def _on_start(self, _button):
+        self._claim_for("enroll")
+
+    def _claim_for(self, phase):
+        """One claim path for both phases; _on_claimed dispatches on it.
+
+        The claim itself is identical -- same polkit action, same device -- so
+        what differs is only which operation it is then used for. Keeping one
+        path means the close-while-polkit-is-up release invariant below is
+        implemented once rather than twice.
+        """
+        if self.running or self.device is None:
+            return
+        self._pending_phase = phase
+        self.cal_button.set_sensitive(False)
+        self.start_button.set_sensitive(False)
+        self.status_label.set_text("Authorizing…")
+        self.hint_label.set_text(
+            "polkit is asking for your password to claim the reader.")
+        self._add_log("info", "Claiming the reader",
+                      "to calibrate" if phase == "calibrate" else "to enroll")
+        # Async: this call waits on a human typing a password, and a sync call
+        # here froze the window before it had painted.
+        self.device.call(
+            "Claim", GLib.Variant("(s)", (os.environ.get("USER", ""),)),
+            Gio.DBusCallFlags.NONE, 120000, None, self._on_claimed, None,
+        )
+
+    def _on_claimed(self, proxy, result, _data):
+        try:
+            proxy.call_finish(result)
+        except GLib.Error as error:
+            if self._closed:
+                return
+            self.status_label.set_text("Could not claim the reader")
+            self.hint_label.set_text(error.message or "")
+            self._add_log("driver", "Claim failed", error.message or "")
+            self._idle_buttons()
+            return
+
+        # The window can be closed while polkit's password dialog is still up.
+        # The claim is granted anyway -- cancelling the Gio call would not stop
+        # fprintd from granting it server-side -- so this callback can arrive
+        # after teardown, against widgets that are gone and a parent that has
+        # already been told the enrollment finished. Release and get out: by
+        # the time close-request ran there was nothing to release yet, so this
+        # is the only place that can honour the claim/release invariant.
+        if self._closed:
+            try:
+                self.device.call_sync("Release", None, Gio.DBusCallFlags.NONE,
+                                      5000, None)
+            except GLib.Error:
+                pass
+            _log("claim granted after the window closed -- released")
+            return
+
+        stages = self._stages_now()
+        if stages and stages != self.stages:
+            self._add_log("info", "Stages reported after claim",
+                          f"{stages} (was {self.stages or 'unknown'})")
+            self.stages = stages
+            self.info["stages"] = stages
+        self.dots.configure(self.stages)
+        self.strip.reset()
+        self._saw_contact = False
+
+        self._released = False
+        self._props_handler = self.device.connect(
+            "g-properties-changed", self._on_properties_changed)
+        self._signal_handler = self.device.connect("g-signal", self._on_signal)
+
+        if self._pending_phase == "calibrate":
+            self._begin_calibrate()
+        else:
+            self._begin_enroll()
+
+    def _idle_buttons(self):
+        """Back to the resting state, with the gate deciding which verb leads."""
+        self.phase = "idle"
+        self.cal_button.set_sensitive(True)
+        self.start_button.set_sensitive(True)
+        self.stop_button.set_sensitive(False)
+        self._update_cal()
+        self._set_stages_note()
+
+    def _begin_enroll(self):
+        self.passed = 0
+        self.attempts = 0
+        self.tally.clear()
+        self.restarts = 0
+        self._dry_restarts = 0
+        self._contact_since_restart = False
+        self._restart_block = None
+
+        try:
+            self.device.call_sync("EnrollStart", GLib.Variant("(s)", (self.finger,)),
+                                  Gio.DBusCallFlags.NONE, 10000, None)
+        except GLib.Error as error:
+            self._add_log("driver", "EnrollStart failed", error.message or "")
+            self.status_label.set_text("Enrollment did not start")
+            self.hint_label.set_text(error.message or "")
+            self._stop(release=True)
+            self._idle_buttons()
+            return
+
+        self.phase = "enroll"
+        self.running = True
+        self.stop_button.set_sensitive(True)
+        self._set_stages_note()
+        verb = "Swipe" if self.info.get("gesture") == "swipe" else "Press"
+        self.count_label.set_text(f"0 / {self.stages or '?'}")
+        self.status_label.set_text(f"{verb} your {self.label.lower()} finger")
+        first = self._region_for(0) or "the centre of your fingertip"
+        if self.calibrated:
+            self.hint_label.set_text(
+                f"Start with {first}. Calibration showed this hand delivers "
+                "readable ridges, so keep that same quality of contact, but "
+                "move to a DIFFERENT part of the finger for each stage. Every "
+                "stage is stored as its own candidate and unlocking succeeds "
+                "if ANY one matches, so coverage is what wins.")
+        else:
+            self.hint_label.set_text(
+                f"Start with {first}, then move to a different part of the "
+                "finger for each stage: each is stored separately and any "
+                "single match unlocks. The strip above shows how long the "
+                "sensor felt your finger and marks what came back.")
+        self._add_log("info", "Enrollment started", self.finger)
+        self._tick_id = GLib.timeout_add(self.TICK_MS, self._tick)
+
+    def _begin_calibrate(self):
+        self.cal_log.clear()
+        self.cal_tally.clear()
+        self.cal_attempts = 0
+        self.cal_matched = 0
+        self._cal_dry = 0
+        self._cal_contact = False
+        self._lifted = True
+        self._presence_changes = 0
+        self._last_counted_at = 0.0
+        self._cal_noted_no_lift = False
+        self._cal_suppressed = 0
+
+        if not self._verify_cycle(first=True):
+            return
+
+        self.phase = "calibrate"
+        self.running = True
+        self.stop_button.set_sensitive(True)
+        self.count_label.set_text(f"\u2014 / {self.stages or '?'}")
+        self.tally_label.set_text("")
+        self._set_stages_note()
+        self._update_cal_tally()
+        self.status_label.set_text("Calibrating — not enrolling")
+        self.hint_label.set_text(
+            "Touch the pad the way you would to unlock, then lift clear. "
+            "Nothing is written; press Stop whenever you like.")
+        self._add_log("info", "Calibration started",
+                      "VerifyStart(any) — writes nothing")
+        self._tick_id = GLib.timeout_add(self.TICK_MS, self._tick)
+        self._update_cal()
+
+    def _verify_cycle(self, first=False):
+        """VerifyStop (unless first) then VerifyStart("any"). True on success.
+
+        fprintd requires VerifyStop before the next VerifyStart once a
+        VerifyStatus has arrived with done = True -- and BOTH `verify-match`
+        and `verify-no-match` are done = True. So the practice loop is this
+        pair, and the retry results (done = False) must NOT go through it:
+        fprintd keeps the verify open for those and is already waiting for the
+        next finger. Calling Stop/Start on a retry would throw the operation
+        away mid-flight.
+
+        "any" rather than self.finger, which is what `fprintd-verify` with no
+        -f does: it scores against EVERY enrolled template, so once a second
+        slot holds a fresh print, calibration measures both without being told
+        about it. VerifyFingerSelected names whichever one fprintd picked.
+        """
+        if not first:
+            try:
+                self.device.call_sync("VerifyStop", None, Gio.DBusCallFlags.NONE,
+                                      10000, None)
+            except GLib.Error as error:
+                # Not fatal on its own: the next VerifyStart is the real test.
+                _log(f"VerifyStop on cycle: {error.message}")
+        try:
+            self.device.call_sync("VerifyStart", GLib.Variant("(s)", ("any",)),
+                                  Gio.DBusCallFlags.NONE, 10000, None)
+        except GLib.Error as error:
+            self._add_log("driver", "VerifyStart failed", error.message or "")
+            self.status_label.set_text("Calibration did not start")
+            self.hint_label.set_text(
+                f"{error.message or ''} If this keeps happening the reader may "
+                "be wedged — close this window and run "
+                "./fp-debug.sh rebind.")
+            self._stop(release=True)
+            self._idle_buttons()
+            return False
+        return True
+
+    def _tick(self):
+        if not self.running:
+            self._tick_id = None
+            return False
+        self.strip.queue_draw()
+        return True
+
+    def _on_properties_changed(self, _proxy, changed, _invalidated):
+        values = changed.unpack() if changed is not None else {}
+        if "finger-present" in values:
+            self._saw_contact = True
+            if values["finger-present"]:
+                # Distinguishes "the fault keeps interrupting a session the
+                # user is actually working" from "the endpoint is wedged and
+                # faulting with nothing touching it". See MAX_DRY_RESTARTS
+                # and MAX_CAL_DRY.
+                self._contact_since_restart = True
+                self._cal_contact = True
+            else:
+                # THE LIFT. Hooked on the real finger-present transition --
+                # deliberately NOT on close_open_contact(), which the result
+                # handlers call artificially whether or not the finger moved.
+                # That is what made a dozen results from one unbroken press
+                # look like a dozen placements, each with a plausible contact
+                # duration (§20r).
+                self._lifted = True
+                self._cal_noted_no_lift = False
+            # ANY transition means something moved, which is the evidence a
+            # new press happened. It never gates the re-arm -- see §20s.
+            self._presence_changes += 1
+            self.strip.set_present(bool(values["finger-present"]))
+        if "finger-present" in values or "finger-needed" in values:
+            present = self.device.get_cached_property("finger-present")
+            needed = self.device.get_cached_property("finger-needed")
+            self._render_live(
+                None if present is None else present.unpack(),
+                None if needed is None else needed.unpack(),
+            )
+
+    def _on_signal(self, _proxy, _sender, signal, params):
+        # VerifyFingerSelected is the one signal in this set that is not an
+        # outcome -- fprintd emits it before the result to name the template
+        # it is about to score against. It must not be counted as an attempt.
+        if signal == "VerifyFingerSelected":
+            try:
+                finger = params.unpack()[0]
+            except (TypeError, ValueError, IndexError):
+                return
+            labels = {name: text for name, text in FINGERS}
+            self._add_log("info", "Scoring against",
+                          labels.get(finger, finger))
+            return
+
+        if signal not in ("EnrollStatus", "VerifyStatus"):
+            return
+        try:
+            result, done = params.unpack()
+        except (TypeError, ValueError):
+            self._add_log("driver", f"Unreadable {signal}", str(params))
+            return
+        if signal == "VerifyStatus":
+            self._handle_verify_result(result, bool(done))
+        else:
+            self._handle_result(result, bool(done))
+
+    def _handle_verify_result(self, result, done):
+        """One calibration attempt. Writes nothing; never touches a template.
+
+        The loop lives at the bottom: a done = True result has ended fprintd's
+        verify, so it is restarted here. See _verify_cycle for why a retry
+        (done = False) must not be.
+        """
+        kind, title, bucket, hint = VERIFY_RESULTS.get(
+            result, ("driver", result, "driver",
+                     "Not a documented fprintd verify result."))
+
+        # Can this reader tell us when the finger comes off? Only gate on the
+        # lift if it can -- a reader that never reports finger-present would
+        # otherwise have every result suppressed and calibration would measure
+        # nothing at all.
+        gated = self.strip.supported is True
+        now = time.monotonic()
+        quiet = (now - self._last_counted_at) < self.SAME_PRESS_S
+        unmoved = gated and not self._lifted and self._presence_changes == 0
+
+        if unmoved and quiet:
+            # One unbroken press cannot produce more than one measurement, and
+            # counting it again is how the rolling window filled with ten
+            # rejects from a single contact (§20r). Note what this branch does
+            # NOT do: it does not skip the re-arm below. §20s.
+            self._cal_suppressed += 1
+            if not self._cal_noted_no_lift:
+                self._cal_noted_no_lift = True
+                self._add_log("info", "Same contact \u2014 not counted",
+                              f"{title}; lift the finger to measure again")
+            self.status_label.set_text("Lift the finger clear")
+            self.hint_label.set_text(
+                "That came from the same press as the last one, so it is not "
+                "counted. Take the finger right off the pad, then put it back "
+                "down \u2014 the reader will not start a new capture while it "
+                "can still feel it.")
+            if done and self.running and self.phase == "calibrate":
+                self._verify_cycle()
+            return
+
+        if unmoved:
+            # The escape hatch. finger-present reported nothing for longer than
+            # one press can plausibly last, so this is counted rather than
+            # suppressed forever -- and said out loud, because "the driver
+            # reported a lift" and "we assumed one" must stay distinguishable.
+            self._add_log("info", "Counted without a reported lift",
+                          f"no finger-present change in "
+                          f"{now - self._last_counted_at:.1f}s; see §20j")
+
+        duration = self.strip.close_open_contact()
+        self.strip.mark(kind, duration)
+        self._lifted = False
+        self._presence_changes = 0
+        self._last_counted_at = now
+
+        self.cal_attempts += 1
+        self.cal_tally[title] = self.cal_tally.get(title, 0) + 1
+
+        # Only placement evidence goes in the rolling window. A driver fault
+        # says nothing about the hand, so counting it would drag the score
+        # down for something the user cannot act on -- the same conflation
+        # that sent §20g chasing the driver for three sessions.
+        if bucket == "scored":
+            self.cal_log.append(True)
+            self._cal_dry = 0
+            if result == "verify-match":
+                self.cal_matched += 1
+        elif bucket == "rejected":
+            self.cal_log.append(False)
+            self._cal_dry = 0
+
+        detail = hint
+        if duration:
+            detail = (f"{duration:.2f}s of contact — {hint}" if hint
+                      else f"{duration:.2f}s of contact")
+        self._add_log(kind, title, detail)
+        self._update_cal()
+        self._update_cal_tally()
+
+        if not done:
+            # fprintd is still waiting for the next finger on the same verify.
+            if bucket == "rejected":
+                self.hint_label.set_text(f"{hint} {self._cycle_hint()}".strip())
+            return
+
+        if not self.running or self.phase != "calibrate":
+            return
+
+        if bucket == "driver":
+            self._cal_dry = 0 if self._cal_contact else self._cal_dry + 1
+            self._cal_contact = False
+            if self._cal_dry >= self.MAX_CAL_DRY:
+                self.status_label.set_text("The reader is faulting on its own")
+                self.hint_label.set_text(
+                    f"{self._cal_dry} driver faults in a row with no finger "
+                    "contact between them. That is a wedged endpoint, not "
+                    "your placement. Close this window and run "
+                    "./fp-debug.sh rebind.")
+                self._add_log("driver", "Calibration stopped",
+                              f"{self._cal_dry} dry faults")
+                self._stop(release=True)
+                self._idle_buttons()
+                return
+
+        # ALWAYS, for every bucket. The device must be listening every moment
+        # the user might touch it; whether the result gets COUNTED is decided
+        # above and has nothing to do with arming. §20s.
+        self._verify_cycle()
+
+    def _region_for(self, index):
+        """The region for the 0-based stage `index`, or None past the end.
+
+        Indexed modulo the list, so a device reporting 5 or 8 stages instead
+        of this one's 6 still gets a region for every stage.
+        """
+        if index < 0:
+            return None
+        if self.stages and index >= self.stages:
+            return None
+        return self.ENROLL_REGIONS[index % len(self.ENROLL_REGIONS)]
+
+    def _stage_hint(self, duration=None):
+        """Lift, then move to a DIFFERENT region for the next stage.
+
+        self.passed has already been incremented, so it is the 0-based index
+        of the stage that comes next.
+        """
+        cycle = self._cycle_hint(duration)
+        region = self._region_for(self.passed)
+        if region is None:
+            return cycle
+        return (f"{cycle} For stage {self.passed + 1}, use {region}. Each "
+                "stage is stored as its own candidate and unlocking succeeds "
+                "if ANY one of them matches, so covering different parts of "
+                "the finger is what makes it work.")
+
+    def _cycle_hint(self, duration=None):
+        """The instruction libfprint's state machine actually requires.
+
+        This reader goes through libfprint's IMAGE device layer -- the journal
+        names its states -- and that layer runs a fixed cycle:
+
+            IDLE -> AWAIT_FINGER_ON -> CAPTURE -> AWAIT_FINGER_OFF -> IDLE
+
+        The next capture cannot begin until the driver has reported the finger
+        GONE while in AWAIT_FINGER_OFF. So "lift clear, then go again" is not
+        encouragement, it is the protocol: a finger left resting on the sensor
+        stalls the run with no error message at all.
+
+        fprintd's own clients say exactly this. enroll_result_str_to_msg() in
+        fingerprint-strings.h maps enroll-stage-passed and enroll-retry-scan to
+        "Lift then touch again" (press) / "Swipe your finger again" (swipe),
+        and gnome-control-center falls back to "Repeatedly lift and place your
+        finger on the reader to enroll your fingerprint". This panel was the
+        odd one out: it said "once more" without ever saying to lift.
+        """
+        again = ("swipe again" if self.info.get("gesture") == "swipe"
+                 else "touch it again")
+        text = (f"Lift the finger clear of the sensor, then {again}. "
+                "The reader will not start the next capture while it can "
+                "still feel the finger.")
+        if duration:
+            text += f" That one took {duration:.2f}s of contact."
+        return text
+
+    def _handle_result(self, result, done):
+        kind, title, hint = ENROLL_RESULTS.get(
+            result, ("driver", result, "Not a documented fprintd result."))
+        # Pair the result with the contact that produced it. A result can
+        # arrive while the driver still reports the finger down, so the contact
+        # is closed here rather than waiting for an off-transition that may
+        # never come.
+        duration = self.strip.close_open_contact()
+
+        if kind == "stage":
+            self.passed += 1
+            self.dots.set_passed(self.passed)
+            self.count_label.set_text(f"{self.passed} / {self.stages or '?'}")
+            self.strip.mark("stage", duration)
+            self.attempts += 1
+            detail = f"stage {self.passed} of {self.stages or '?'}"
+            if duration:
+                detail += f", {duration:.2f}s of contact"
+            self._add_log("stage", "Accepted", detail)
+            self.status_label.set_text(
+                f"Accepted — {self.passed} of {self.stages or '?'}")
+            self.hint_label.set_text(self._stage_hint(duration))
+            self._update_tally()
+            return
+
+        if not done:
+            self.attempts += 1
+            self.tally[title] = self.tally.get(title, 0) + 1
+            self.strip.mark(kind, duration)
+            detail = hint
+            if duration:
+                detail = f"{duration:.2f}s of contact — {hint}" if hint else f"{duration:.2f}s of contact"
+            self._add_log(kind, title, detail)
+            # Name the progress on the same line. A bare "No usable detail"
+            # sitting there reads as "it stopped", which is how this got
+            # reported as the enrollment halting when it had not.
+            self.status_label.set_text(
+                f"{title} — still going, {self.passed} of "
+                f"{self.stages or '?'}")
+            if kind == "driver":
+                self.hint_label.set_text(
+                    f"{hint} This is not your gesture — changing how you move "
+                    "the finger will not help.")
+            else:
+                repeats = self.tally.get(title, 0)
+                # Only on enroll-retry-scan. The other gesture results carry
+                # their own wording about the finger, and appending the cycle
+                # line to them collides: enroll-swipe-too-short says "do not
+                # lift partway", enroll-remove-and-retry already says to lift.
+                # fprintd maps exactly enroll-retry-scan (and stage-passed) to
+                # "Lift then touch again", so match that and no more.
+                if result == "enroll-retry-scan":
+                    hint = f"{hint} {self._cycle_hint()}".strip()
+                self.hint_label.set_text(
+                    f"{hint}" if repeats < 3 else
+                    f"{hint} That is {repeats} times with the same reason — if "
+                    "it keeps repeating, the driver may simply not handle this "
+                    "sensor.")
+            self._update_tally()
+            return
+
+        # Terminal -- fprintd has ended this enrollment.
+        self.strip.mark(kind, duration)
+
+        # ...but a driver fault has not ended the SESSION: the claim is still
+        # ours. Restart rather than making the user re-authorize, and count it
+        # like any other attempt so the tally stays the record. This branch
+        # must run before _stop(), which would unsubscribe the signal.
+        if kind == "driver" and self._may_restart():
+            self.attempts += 1
+            self.tally[title] = self.tally.get(title, 0) + 1
+            self._add_log(kind, title, hint)
+            self._restart_enrollment(title)
+            self._update_tally()
+            return
+
+        self._stop(release=True)
+        if kind == "done":
+            self.completed = True
+            self.passed = self.stages
+            self.dots.set_passed(self.stages)
+            self.count_label.set_text(f"{self.stages} / {self.stages}")
+            self.status_label.set_text("Enrolled")
+            self.hint_label.set_text(
+                f"{self.label} is stored. Close this window; the panel's "
+                "hyprlock switch can be turned on now.")
+            self._add_log("done", "Enrolled", self.label)
+            self._toast("Finger enrolled", timeout=6)
+        else:
+            self.status_label.set_text(title)
+            # The terminal driver branch gets the same "not your gesture"
+            # framing as the retry branch above. This is the message the user
+            # is left staring at when the run dies, so it is the one that most
+            # needs to say whose problem it is.
+            if kind == "driver":
+                blocked = self._restart_block or ""
+                self.hint_label.set_text(
+                    f"{hint} This is not your gesture -- no way of moving the "
+                    f"finger gets past it. {blocked}".rstrip())
+            else:
+                self.hint_label.set_text(hint)
+            self._add_log(kind, title, hint)
+        self._update_tally()
+        self.phase = "idle"
+        self._set_stages_note()
+        self.cal_button.set_sensitive(True)
+        self.start_button.set_sensitive(True)
+        self.start_button.set_label("Try again")
+
+    # -- teardown ----------------------------------------------------------- #
+
+    def _may_restart(self):
+        """Whether to restart the enrollment ourselves after a driver fault.
+
+        Records WHY it refused in self._restart_block, because "the panel gave
+        up" and "the panel decided your gesture was wrong" look identical from
+        the outside and only one of them is true.
+        """
+        if self.restarts >= self.MAX_RESTARTS:
+            self._restart_block = (
+                f"That is {self.restarts} restarts; stopping here rather than "
+                "looping. Nothing about this is your gesture.")
+            return False
+        if self._dry_restarts >= self.MAX_DRY_RESTARTS:
+            self._restart_block = (
+                f"{self._dry_restarts} driver faults in a row with no finger "
+                "contact between them — the reader looks wedged, which a "
+                "restart cannot clear. Close this and run "
+                "./fp-debug.sh rebind.")
+            return False
+        return True
+
+    def _restart_enrollment(self, reason):
+        """EnrollStop + EnrollStart, keeping the claim and the subscriptions.
+
+        Must NOT go through _stop(): that disconnects the g-signal handler, and
+        the next EnrollStatus would then go nowhere -- the window would look
+        hung with nothing in the log, which is worse than stopping. Nothing
+        here touches the handlers or the tick.
+
+        What it cannot preserve is the stage count. fprintd discards the
+        partial enrollment when the operation fails, so the next EnrollStart
+        genuinely starts at zero. The UI says that out loud rather than
+        resetting quietly, which would read as a glitch.
+        """
+        self.restarts += 1
+        self._dry_restarts = 0 if self._contact_since_restart else self._dry_restarts + 1
+        self._contact_since_restart = False
+
+        for method, args in (
+                ("EnrollStop", None),
+                ("EnrollStart", GLib.Variant("(s)", (self.finger,)))):
+            try:
+                self.device.call_sync(method, args, Gio.DBusCallFlags.NONE,
+                                      10000, None)
+            except GLib.Error as error:
+                self._add_log("driver", f"{method} failed on restart",
+                              error.message or "")
+                self.status_label.set_text("Could not restart the enrollment")
+                self.hint_label.set_text(
+                    f"{error.message or ''} The reader may be wedged — close "
+                    "this window and run ./fp-debug.sh rebind.")
+                self._stop(release=True)
+                self.cal_button.set_sensitive(True)
+                self.start_button.set_sensitive(True)
+                self.start_button.set_label("Try again")
+                return
+
+        lost = self.passed
+        self.passed = 0
+        self.dots.set_passed(0)
+        self.count_label.set_text(f"0 / {self.stages or '?'}")
+        self.status_label.set_text(
+            f"{reason} — restarted ({self.restarts})")
+        if lost:
+            discarded = (f"fprintd discarded the {lost} stage"
+                         f"{'s' if lost != 1 else ''} already captured, so the "
+                         f"count is back to 0 of {self.stages or '?'}.")
+        else:
+            discarded = (f"No stage had passed yet, so the count stays at 0 of "
+                         f"{self.stages or '?'}.")
+        self.hint_label.set_text(
+            "The driver fault ended fprintd's enrollment, not the session. "
+            + discarded
+            + " The reader is still claimed, so you are not asked for your "
+              "password again — keep going. " + self._cycle_hint())
+        self._add_log("info", f"Restarted enrollment ({self.restarts})",
+                      f"{reason}; fprintd discarded {lost} stage(s)")
+
+    def _on_stop_clicked(self, _button):
+        was = self.phase
+        self._add_log("info", "Stopped by you", was)
+        self._stop(release=True)
+        if was == "calibrate":
+            ready, scored, window = self._cal_gate()
+            self.status_label.set_text("Calibration stopped")
+            self.hint_label.set_text(
+                "Nothing was written. "
+                + ("Your placement is scoring — enroll from it now."
+                   if ready else
+                   f"{scored} of the last {window} reached the matcher; "
+                   "calibrate again when you want to keep measuring."))
+        else:
+            self.status_label.set_text("Stopped")
+            self.hint_label.set_text("Press Enroll to go again.")
+        self._idle_buttons()
+
+    def _stop(self, release=True):
+        """Unsubscribe, stop whatever is running, release. Safe to call twice.
+
+        INVARIANT: this must run BEFORE anything else resets self.phase -- it
+        is the only thing that knows which operation the claim was being used
+        for, and stopping the wrong one leaves fprintd's running. Every caller
+        pairs it as `_stop(); _idle_buttons()`, never the reverse, because
+        _idle_buttons sets phase = "idle".
+        """
+        was = self.phase if self.phase != "idle" else self._last_phase
+        if self.phase != "idle":
+            self._last_phase = self.phase
+        self.phase = "idle"
+        self.running = False
+        self.stop_button.set_sensitive(False)
+        if self._tick_id is not None:
+            GLib.source_remove(self._tick_id)
+            self._tick_id = None
+        for attr in ("_signal_handler", "_props_handler"):
+            handler = getattr(self, attr)
+            if handler is not None:
+                try:
+                    self.device.disconnect(handler)
+                except (TypeError, AttributeError):
+                    pass
+                setattr(self, attr, None)
+        if release and self.device is not None and not self._released:
+            # Stop the operation this claim was actually being used for. The
+            # wrong one raises, which is caught -- but calling only the right
+            # one keeps the journal readable, and a leaked claim leaves the
+            # next Super+L with no fingerprint at all.
+            #
+            # `_released` makes a second _stop() a no-op. Without it, the
+            # close-request _stop that follows an _idle_buttons found
+            # phase == "idle", guessed EnrollStop, and fprintd logged
+            # "Device was not claimed before use" for both calls -- a line
+            # that reads exactly like a claim leak and is the opposite of one.
+            self._released = True
+            first = "VerifyStop" if was == "calibrate" else "EnrollStop"
+            for method in (first, "Release"):
+                try:
+                    self.device.call_sync(method, None, Gio.DBusCallFlags.NONE,
+                                          5000, None)
+                except GLib.Error:
+                    pass
+
+    def _on_close_request(self, _window):
+        self._closed = True
+        self._stop(release=True)
+        self.parent._enroll_finished(self.completed)
+        return False
+
 
 class TritonWindow(Adw.ApplicationWindow):
 
@@ -774,11 +3194,16 @@ class TritonWindow(Adw.ApplicationWindow):
             return None
 
     def _on_close(self, _window):
-        """Release the reader before the window goes. Synchronous on purpose:
-        two short D-Bus calls on the main loop, ordered, with no thread to
-        outlive the window."""
-        if getattr(self, "_enrolling", False) and self.fp_device is not None:
-            self._fp_release()
+        """Close the enrollment window first so ITS close handler releases the
+        reader. A claim left behind means the next Super+L has no fingerprint
+        until fprintd times the claim out."""
+        window = getattr(self, "_enroll_window", None)
+        if window is not None:
+            window.close()
+        # Same invariant for a test left running: the claim outlives the
+        # window otherwise.
+        if getattr(self, "_testing", False):
+            self._test_end("Window closed.")
         return False
 
     def _toast(self, message, timeout=5):
@@ -826,8 +3251,8 @@ class TritonWindow(Adw.ApplicationWindow):
         page.add(self._fingerprint_group())
 
     @staticmethod
-    def _graph_group(title, graph):
-        group = Adw.PreferencesGroup(title=title)
+    def _graph_card(graph):
+        """A graph in a libadwaita card, ready to drop into any group."""
         frame = Gtk.Box()
         frame.add_css_class("card")
         frame.set_margin_top(2)
@@ -837,7 +3262,12 @@ class TritonWindow(Adw.ApplicationWindow):
         graph.set_margin_end(8)
         graph.set_hexpand(True)
         frame.append(graph)
-        group.add(frame)
+        return frame
+
+    @classmethod
+    def _graph_group(cls, title, graph):
+        group = Adw.PreferencesGroup(title=title)
+        group.add(cls._graph_card(graph))
         return group
 
     @staticmethod
@@ -929,7 +3359,14 @@ class TritonWindow(Adw.ApplicationWindow):
         return group
 
     def _battery_group(self):
-        group = Adw.PreferencesGroup(title="Battery")
+        group = Adw.PreferencesGroup(
+            title="Battery",
+            description="What has been consumed, and how long the draw right "
+                        "now leaves",
+        )
+        self.battery_graph = BatteryGraph()
+        group.add(self._graph_card(self.battery_graph))
+
         self.cap_row = Adw.SwitchRow(
             title="80% charge cap",
             subtitle="Acer health mode, via acer-wmi-battery",
@@ -944,6 +3381,20 @@ class TritonWindow(Adw.ApplicationWindow):
         self.bat_row.add_suffix(self.bat_value)
         group.add(self.bat_row)
 
+        self.drain_row = Adw.ActionRow(title="Consumption")
+        self.drain_value = Gtk.Label(xalign=1.0)
+        self.drain_value.add_css_class("numeric")
+        self.drain_value.add_css_class("dim-label")
+        self.drain_row.add_suffix(self.drain_value)
+        group.add(self.drain_row)
+
+        self.left_row = Adw.ActionRow(title="Time left")
+        self.left_value = Gtk.Label(xalign=1.0)
+        self.left_value.add_css_class("numeric")
+        self.left_value.add_css_class("dim-label")
+        self.left_row.add_suffix(self.left_value)
+        group.add(self.left_row)
+
         self.health_row = Adw.ActionRow(title="Health")
         self.health_value = Gtk.Label(xalign=1.0)
         self.health_value.add_css_class("numeric")
@@ -951,6 +3402,71 @@ class TritonWindow(Adw.ApplicationWindow):
         self.health_row.add_suffix(self.health_value)
         group.add(self.health_row)
         return group
+
+    def _apply_projection(self, trend):
+        """The two rows the graph's dashed line is made of.
+
+        They say which number is which on purpose. The draw is an EMA over the
+        last ~45 s and is the only one that answers "at the consumption right
+        now"; the average is the whole run and answers what the session has
+        been costing. When the two disagree the run was not uniform, and both
+        being on screen is how that becomes visible instead of being smoothed
+        into one authoritative-looking figure.
+        """
+        if trend is None:
+            self.drain_value.set_text("--")
+            self.drain_row.set_subtitle("")
+            self.left_value.set_text("--")
+            self.left_row.set_subtitle("")
+            return
+
+        direction = trend["direction"]
+        if trend["rate_w"] is None:
+            self.drain_value.set_text("--")
+            self.drain_row.set_subtitle(trend["note"] or "idle")
+        else:
+            text = f"{trend['rate_w']:.1f} W"
+            if trend["wh_full"]:
+                text += f"   {trend['rate_w'] / trend['wh_full'] * 100.0:.1f} %/h"
+            self.drain_value.set_text(text)
+            detail = [
+                ("into the pack" if direction == "charging" else "draw")
+                + f", averaged over the last {BATTERY_EMA_SECONDS} s"
+            ]
+            if trend["average_w"] is not None:
+                detail.append(
+                    f"{trend['average_w']:.1f} W over the run so far "
+                    f"({human_duration(trend['run_seconds'])})"
+                )
+            self.drain_row.set_subtitle(" · ".join(detail))
+
+        self.left_row.set_title(
+            f"Time to {trend['target_percent']:.0f}%" if direction == "charging"
+            else "Time left"
+        )
+        if trend["seconds_left"] is None:
+            self.left_value.set_text("--")
+            note = trend["note"] or "nothing to project"
+        elif trend["over"]:
+            self.left_value.set_text(
+                "> " + human_duration(BATTERY_PROJECTION_MAX_SECONDS))
+            note = ("at this draw the projection runs past a day, which is not "
+                    "worth putting a clock time on")
+        else:
+            self.left_value.set_text(human_duration(trend["seconds_left"]))
+            when = time.strftime("%H:%M", time.localtime(trend["eta"]))
+            if direction == "charging":
+                note = f"full ≈ {when}" if not trend["cap_on"] else (
+                    f"≈ {when}, where the cap stops it")
+            else:
+                note = (f"empty ≈ {when} if the draw holds · the firmware cuts "
+                        "off a few % above 0, so read this as the outer edge")
+        if trend["after_gap"]:
+            # The run restarted at a resume, so the history on screen is only
+            # the part since waking. Saying so is cheaper than letting someone
+            # wonder where the graph went.
+            note += " · the run restarted at a gap in the clock"
+        self.left_row.set_subtitle(note)
 
     def _keyboard_group(self):
         group = Adw.PreferencesGroup(title="Keyboard")
@@ -969,8 +3485,12 @@ class TritonWindow(Adw.ApplicationWindow):
         """
         self.fp_device, self.fp_info = fprint_device()
         self._enrolling = False
-        self._enroll_handler = None
-        self._enroll_stage = 0
+        self._enroll_window = None
+        # -- one-shot verify state. See _on_fp_test.
+        self._testing = False
+        self._test_sig = None
+        self._test_timeout_id = None
+        self._test_selected = None
 
         group = Adw.PreferencesGroup(
             title="Fingerprint",
@@ -989,6 +3509,21 @@ class TritonWindow(Adw.ApplicationWindow):
         self.fp_enrolled_value.add_css_class("dim-label")
         self.fp_enrolled_row.add_suffix(self.fp_enrolled_value)
         group.add(self.fp_enrolled_row)
+
+        # The one question the rest of this group could not answer: does a
+        # stored print actually match? Enrolling proved it could be stored
+        # (§20l) and verify then failed 4/4 (§20m), so "enrolled" and "works"
+        # are genuinely different states and the panel showed only the first.
+        self.fp_test_row = Adw.ActionRow(
+            title="Test a stored print",
+            subtitle="Runs one verify. Writes nothing.",
+        )
+        test = Gtk.Button(label="Test")
+        test.set_valign(Gtk.Align.CENTER)
+        test.connect("clicked", self._on_fp_test)
+        self.fp_test_button = test
+        self.fp_test_row.add_suffix(test)
+        group.add(self.fp_test_row)
 
         self.fp_finger_row = Adw.ComboRow(title="Finger to enroll")
         model = Gtk.StringList()
@@ -1045,14 +3580,18 @@ class TritonWindow(Adw.ApplicationWindow):
                 self.fp_enrolled_value.set_text("--")
                 for widget in (self.fp_finger_row, self.fp_delete_row,
                                self.fp_unlock_row, self.fp_enroll_button,
-                               self.fp_delete_button):
+                               self.fp_delete_button, self.fp_test_row,
+                               self.fp_test_button):
                     widget.set_sensitive(False)
                 self.fp_sudo_value.set_text("--")
                 return
 
             info = self.fp_info
             self.fp_status_value.set_text(
-                f"{info['name']} · {info['scan_type']} · {info['stages']} stages"
+                f"{info['name']} · {info['scan_type']}"
+                + (f" → really {info['gesture']}"
+                   if info.get("driver_scan_type_wrong") else "")
+                + f" · {info['stages']} stages"
             )
 
             fingers, error = fprint_list(self.fp_device, os.environ.get("USER", ""))
@@ -1066,6 +3605,17 @@ class TritonWindow(Adw.ApplicationWindow):
                     ", ".join(labels.get(f, f) for f in fingers) if fingers else "none"
                 )
                 self.fp_enrolled_row.set_subtitle("")
+
+            # Nothing to verify against until something is enrolled, and
+            # VerifyStart would fail with NoEnrolledPrints.
+            self.fp_test_row.set_sensitive(bool(fingers))
+            self.fp_test_button.set_sensitive(bool(fingers))
+            if not fingers:
+                self.fp_test_row.set_subtitle("Enroll a finger first")
+            elif not self._testing:
+                self.fp_test_row.set_subtitle(
+                    "Runs one verify against every stored print. "
+                    "Writes nothing.")
 
             enabled, conflict = hyprlock_block_state()
             self.fp_unlock_row.set_active(enabled)
@@ -1093,100 +3643,198 @@ class TritonWindow(Adw.ApplicationWindow):
     def _fp_busy(self, busy):
         self._enrolling = busy
         for widget in (self.fp_finger_row, self.fp_enroll_button,
-                       self.fp_delete_button, self.fp_delete_row):
+                       self.fp_delete_button, self.fp_delete_row,
+                       self.fp_test_row, self.fp_test_button):
             widget.set_sensitive(not busy)
 
-    def _fp_release(self):
-        """Release the reader. MUST run on every path out of an enrollment:
-        a claim left behind means the next Super+L has no fingerprint until
-        fprintd times it out."""
-        if self._enroll_handler is not None:
+    # -- testing a stored print --------------------------------------------- #
+    #
+    # A one-shot verify, reported in the row's own subtitle. Deliberately NOT
+    # the calibration loop in EnrollWindow: that one measures placement over
+    # many attempts to decide whether re-enrolling is worth it, this one
+    # answers "does the print I have work?" once.
+    #
+    # THE HAZARD HERE IS THE CLAIM, not the result. fprintd grants one claim at
+    # a time, and a claim left behind leaves the next Super+L with no
+    # fingerprint until fprintd times it out. A verify that nobody ever touches
+    # does not end on its own, so this path releases on EVERY exit: the result,
+    # Cancel, the window closing, and a hard timeout.
+    TEST_TIMEOUT_MS = 30000
+
+    def _on_fp_test(self, _button):
+        if self.fp_device is None or self._enrolling:
+            return
+        if self._testing:
+            self._test_end("Cancelled. The reader was released.")
+            return
+
+        self._testing = True
+        self._test_selected = None
+        self.fp_test_button.set_label("Cancel")
+        self.fp_test_row.set_subtitle("Authorizing\u2026")
+        for widget in (self.fp_finger_row, self.fp_enroll_button,
+                       self.fp_delete_button, self.fp_delete_row):
+            widget.set_sensitive(False)
+        # Async, for the same reason EnrollWindow claims asynchronously: this
+        # waits on a human typing a polkit password and a sync call freezes
+        # the window.
+        self.fp_device.call(
+            "Claim", GLib.Variant("(s)", (os.environ.get("USER", ""),)),
+            Gio.DBusCallFlags.NONE, 120000, None, self._on_test_claimed, None,
+        )
+
+    def _on_test_claimed(self, proxy, result, _data):
+        try:
+            proxy.call_finish(result)
+        except GLib.Error as error:
+            self._test_end(f"Could not claim the reader: {error.message}")
+            return
+
+        # Cancel can land while polkit's dialog is still up. The claim is
+        # granted server-side anyway, so it has to be released here -- when
+        # Cancel ran there was nothing to release yet.
+        if not self._testing:
             try:
-                self.fp_device.disconnect(self._enroll_handler)
-            except (TypeError, AttributeError):
-                pass
-            self._enroll_handler = None
-        for method in ("EnrollStop", "Release"):
-            try:
-                self.fp_device.call_sync(method, None, Gio.DBusCallFlags.NONE, 5000, None)
+                self.fp_device.call_sync("Release", None, Gio.DBusCallFlags.NONE,
+                                         5000, None)
             except GLib.Error:
                 pass
+            _log("test: claim granted after cancel -- released")
+            return
+
+        self._test_sig = self.fp_device.connect("g-signal", self._on_test_signal)
+        try:
+            # "any" scores against every enrolled template, which is what
+            # `fprintd-verify` with no -f does; VerifyFingerSelected then names
+            # whichever one fprintd picked.
+            #
+            # What hyprlock passes here is NOT established. Its binary does
+            # contain the string `any` (only visible with `strings -n 3` --
+            # three characters is under the default minimum), but a
+            # three-character string shows up in a binary for many reasons and
+            # that is weak evidence. So: this mirrors fprintd's own client,
+            # which is the strongest thing that can honestly be said for it.
+            self.fp_device.call_sync("VerifyStart", GLib.Variant("(s)", ("any",)),
+                                     Gio.DBusCallFlags.NONE, 10000, None)
+        except GLib.Error as error:
+            self._test_end(f"VerifyStart failed: {error.message}")
+            return
+
+        verb = "Touch" if self.fp_info.get("gesture") != "swipe" else "Swipe"
+        self.fp_test_row.set_subtitle(
+            f"{verb} the sensor now \u2014 flat, centred, still until it answers")
+        self._test_timeout_id = GLib.timeout_add(
+            self.TEST_TIMEOUT_MS, self._on_test_timeout)
+
+    def _on_test_timeout(self):
+        self._test_timeout_id = None
+        self._test_end(
+            "No answer in 30 s \u2014 reader released. Press Test to go again.")
+        return False
+
+    def _on_test_signal(self, _proxy, _sender, signal, params):
+        if signal == "VerifyFingerSelected":
+            try:
+                self._test_selected = params.unpack()[0]
+            except (TypeError, ValueError, IndexError):
+                pass
+            return
+        if signal != "VerifyStatus":
+            return
+        try:
+            result, done = params.unpack()
+        except (TypeError, ValueError):
+            return
+        kind, title, bucket, hint = VERIFY_RESULTS.get(
+            result, ("driver", result, "driver",
+                     "Not a documented fprintd verify result."))
+
+        if not done:
+            # fprintd keeps the verify open and is waiting for another finger,
+            # so this is progress, not an outcome. Do not release.
+            self.fp_test_row.set_subtitle(f"{title} \u2014 try again: {hint}")
+            _log(f"test: {result} (not done)")
+            return
+
+        if result == "verify-match":
+            labels = {name: text for name, text in FINGERS}
+            which = labels.get(self._test_selected, self._test_selected or "a stored print")
+            self._test_end(f"\u2713 Matched \u2014 {which}. This print works.",
+                           toast=f"Fingerprint matched ({which})")
+        elif result == "verify-no-match":
+            self._test_end(
+                "\u2717 No match. The sensor got readable ridges and the "
+                "matcher scored them below the threshold \u2014 that points at "
+                "the stored print, not your finger. Calibrate in the Enroll "
+                "window to measure it properly.")
+        elif bucket == "driver":
+            # No "not your finger" added here: every driver hint in
+            # VERIFY_RESULTS already says whose problem it is, and stacking a
+            # second copy read as the panel protesting too much.
+            self._test_end(f"{title} \u2014 {hint} If it repeats, run "
+                           "./fp-debug.sh rebind.")
+        else:
+            self._test_end(f"{title} \u2014 {hint}")
+
+    def _test_end(self, message, toast=None):
+        """Release on every exit path. Safe to call twice."""
+        self._testing = False
+        if self._test_timeout_id is not None:
+            GLib.source_remove(self._test_timeout_id)
+            self._test_timeout_id = None
+        if self._test_sig is not None:
+            try:
+                self.fp_device.disconnect(self._test_sig)
+            except (TypeError, AttributeError):
+                pass
+            self._test_sig = None
+        if self.fp_device is not None:
+            for method in ("VerifyStop", "Release"):
+                try:
+                    self.fp_device.call_sync(method, None, Gio.DBusCallFlags.NONE,
+                                             5000, None)
+                except GLib.Error:
+                    pass
+        self.fp_test_button.set_label("Test")
+        self.fp_test_row.set_subtitle(message)
+        _log(f"test ended: {message}")
+        if toast:
+            self._toast(toast, timeout=6)
+        for widget in (self.fp_finger_row, self.fp_enroll_button,
+                       self.fp_delete_button, self.fp_delete_row):
+            widget.set_sensitive(True)
 
     def _on_enroll(self, _button):
+        """Hand the whole enrollment to EnrollWindow, which owns the claim.
+
+        Enrolling used to live here and report through a single subtitle on the
+        combo row below. That is how every failed attempt across three sessions
+        on this machine produced no usable account of why: the only surviving
+        evidence was fprintd's own journal. EnrollWindow shows the stage count, the
+        contact the sensor actually felt, and whether a failure was the gesture
+        or the driver -- and mirrors all of it to stderr.
+        """
         if self.fp_device is None or self._enrolling:
             return
         index = self.fp_finger_row.get_selected()
         if index == Gtk.INVALID_LIST_POSITION:
             return
         finger, label = FINGERS[index]
-
-        # Claim raises the polkit dialog (enroll = auth_self_keep). If the user
-        # cancels it we never held the device, so nothing to release.
-        try:
-            self.fp_device.call_sync("Claim", GLib.Variant("(s)", (os.environ.get("USER", ""),)),
-                                     Gio.DBusCallFlags.NONE, 30000, None)
-        except GLib.Error as error:
-            self._toast(f"Could not claim the reader: {error.message}", timeout=7)
-            return
-
         self._fp_busy(True)
-        self._enroll_stage = 0
-        # Subscribed before EnrollStart and disconnected in _fp_release, so a
-        # later enrollment never delivers into a stale closure.
-        self._enroll_handler = self.fp_device.connect("g-signal", self._on_enroll_signal)
-        try:
-            self.fp_device.call_sync("EnrollStart", GLib.Variant("(s)", (finger,)),
-                                     Gio.DBusCallFlags.NONE, 10000, None)
-        except GLib.Error as error:
-            self._fp_release()
-            self._fp_busy(False)
-            self._toast(f"Enrollment did not start: {error.message}", timeout=7)
-            return
+        self._enroll_window = EnrollWindow(self, finger, label)
+        self._enroll_window.present()
 
-        verb = "Swipe" if self.fp_info["scan_type"] == "swipe" else "Press"
-        self.fp_finger_row.set_subtitle(
-            f"{verb} your {label.lower()} finger — 0/{self.fp_info['stages']}"
-        )
-        self._toast(f"{verb} your {label.lower()} finger on the reader", timeout=6)
-
-    def _on_enroll_signal(self, _proxy, _sender, signal, params):
-        """EnrollStatus(result, done). Termination keys on `done`, never on the
-        result string -- the non-terminal strings are only progress hints."""
-        if signal != "EnrollStatus":
-            return
-        result, done = params.unpack()
-        stages = self.fp_info["stages"] or 1
-
-        if not done:
-            if result == "enroll-stage-passed":
-                self._enroll_stage += 1
-                self.fp_finger_row.set_subtitle(
-                    f"Keep going — {self._enroll_stage}/{stages}"
-                )
-            else:
-                hints = {
-                    "enroll-retry-scan": "Did not read — try again",
-                    "enroll-swipe-too-short": "Swipe was too short — try again",
-                    "enroll-finger-not-centered": "Finger off centre — try again",
-                    "enroll-remove-and-retry": "Lift your finger and try again",
-                }
-                self.fp_finger_row.set_subtitle(hints.get(result, result))
-            return
-
-        self._fp_release()
+    def _enroll_finished(self, completed):
+        """Called by EnrollWindow on its way out. It has already released the
+        reader, so this only has to put the group back in order."""
+        self._enroll_window = None
         self._fp_busy(False)
-        if result == "enroll-completed":
-            self.fp_finger_row.set_subtitle("")
-            self._toast("Finger enrolled", timeout=5)
-        else:
-            reasons = {
-                "enroll-failed": "the scans did not match",
-                "enroll-data-full": "the reader's storage is full",
-                "enroll-disconnected": "the reader disconnected",
-            }
-            self.fp_finger_row.set_subtitle("")
-            self._toast(f"Enrollment failed — {reasons.get(result, result)}", timeout=8)
         self._refresh_fingerprint()
+        if completed:
+            self._toast(
+                "Finger enrolled -- the hyprlock switch can be turned on now",
+                timeout=7,
+            )
 
     def _on_fp_delete(self, _button):
         if self.fp_device is None or self._enrolling:
@@ -1213,7 +3861,7 @@ class TritonWindow(Adw.ApplicationWindow):
         # lock screen asks for a finger that no longer exists.
         fingers, _ = fprint_list(self.fp_device, user)
         if not fingers and hyprlock_block_state()[0]:
-            hyprlock_set(False, self.fp_info["scan_type"])
+            hyprlock_set(False, self.fp_info["gesture"])
             self._toast("hyprlock fingerprint unlock turned off too", timeout=6)
         self._refresh_fingerprint()
 
@@ -1228,7 +3876,7 @@ class TritonWindow(Adw.ApplicationWindow):
             row.set_active(enabled)
             self._updating = False
             return
-        error = hyprlock_set(wanted, self.fp_info["scan_type"] if self.fp_info else "press")
+        error = hyprlock_set(wanted, self.fp_info["gesture"] if self.fp_info else "press")
         if error:
             self._toast(f"Could not write hyprlock.conf: {error}", timeout=8)
             self._updating = True
@@ -1399,10 +4047,17 @@ class TritonWindow(Adw.ApplicationWindow):
 
         # Battery
         battery = reading["battery"]
+        trend = reading["battery_trend"]
+        self.battery_graph.set_state(trend)
+        self._apply_projection(trend)
         if battery is None:
             self.cap_row.set_sensitive(False)
             self.cap_row.set_subtitle("no battery present")
             self.bat_value.set_text("--")
+            self.bat_row.set_subtitle("BAT1 is absent — the pack was out of "
+                                      "this machine for three weeks in "
+                                      "October 2026, so this is expected, "
+                                      "not a read failure")
             self.health_value.set_text("--")
         else:
             self.cap_row.set_sensitive(battery["cap"] is not None)
@@ -1418,6 +4073,16 @@ class TritonWindow(Adw.ApplicationWindow):
             if battery["power_w"] > 0.05:
                 detail.append(f"{battery['power_w']:.1f} W")
             self.bat_value.set_text("   ".join(detail))
+            # Wh rather than percent, because this is the "how much has gone"
+            # number and percent already has its own column.
+            if trend and trend["wh_now"] and trend["wh_full"]:
+                gone = trend["used_wh_from_full"]
+                self.bat_row.set_subtitle(
+                    f"{trend['wh_now']:.1f} of {trend['wh_full']:.1f} Wh left"
+                    + (f" · {gone:.1f} Wh used from full" if gone else "")
+                )
+            else:
+                self.bat_row.set_subtitle("")
             health = []
             if battery["health_percent"]:
                 health.append(f"{battery['health_percent']:.0f}% of design")
