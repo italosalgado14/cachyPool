@@ -21,6 +21,57 @@ remediation doc are findable either way: `grep -rn '§N' runbooks/ archive/`.
 
 ---
 
+## 2026-11-04 — The owed reboot landed: 19/0, the Lua config cold-booted, four premises moved
+
+Booted 09:05 on `7.3.1-1-cachyos`, the reboot the 662-package upgrade of 2026-11-03 had been
+waiting for. `tests/check-live-system.sh` reports **19 passed, 0 failed**, one warning and six
+notes. The two FAILs the 2026-11-03 entry recorded as "not faults" were artefacts of the
+un-rebooted kernel and are **both gone**, exactly as that entry predicted: `dkms
+acer-wmi-battery (running)` and `kernel is the installed one` now PASS.
+
+**Verified by this boot, and only obtainable from a boot:** `predator_v4=Y` after a real
+`acer_wmi` load, with `platform_profile` present and the `acer` hwmon at `hwmon5` — the
+parameter is `0444`, so a boot is the only thing that ever sets it; `health_mode=1` for the
+80 % cap; `nvidia` module and `nvidia-utils` both at **615.78.08**, so the version lock held
+and KMS came up.
+
+**The Lua config cold-booted.** `hyprctl reload` by design cannot fire
+`hl.on("hyprland.start")`, and 0.57.1's own upgrade reboot came up on upstream's example
+config, before this one existed — so this is the first session start this repo has measured on
+the migrated config: `hyprctl configerrors` clean and all **twelve** `autostart.lua` entries up
+(elephant, walker, waybar, mako, hyprpaper, hypridle, hyprpolkitagent, swayosd, both
+`wl-paste` watchers, nm-applet, `power-autoswitch.sh`), with `scripts/edp-rate.sh` resolving
+240 Hz off `BAT1=Charging`. Whether an interim logout on 2026-11-03 had already exercised the
+handler is not recorded. `runbooks/updates.md` §4c.
+
+**What the reboot moved, which is the part that needed writing down.** Four of the six rows in
+`runbooks/updates.md` §3 now describe versions this machine no longer runs, and not one of the
+four conclusions was re-measured: the i915 `__gen8_ppgtt_clear` deref was found on kernel
+7.0.12 and 7.3.1 is the third kernel since; `hyprpaper` is **0.8.5-3.1**, so the block-syntax
+workaround for 0.8.4's parser bug rests on a version that is gone; NVIDIA GSP's resume crash
+was recorded on 615.71.09; `linux-cachyos-lts` is **6.18.55-2** and the rollback path has still
+never booted once. `libfprint` is the one premise that held still at 1.94.100 — which is the
+only reason `patches/libfprint-elan-0c4f-busy-retry.patch` still applies. `CLAUDE.md` was
+carrying the dead `hyprpaper 0.8.4` claim in its own text, against its own rule; the version
+now lives only in §3.
+
+**Still owed, in the order the dependencies force.** The 11 `.pacnew` are untouched;
+`/etc/pam.d/sudo.pacnew` was diffed and behaves exactly as `runbooks/updates.md` §2a predicts —
+it drops `auth sufficient pam_fprintd.so` (keep) and adds `session optional pam_systemd.so
+class=none` (adopt). Then `meson`, `gobject-introspection`, `gtk-doc`, `umockdev` are **still
+none installed**, so the libfprint patch is unbuilt and enrolment is still blocked; `hyprpicker`
+is still missing and one `paru -Syu --needed` closes both. Three mirrored files drifted
+repo → live in comments only — the live `acer-wmi-predator-v4.conf` is still the Spanish draft,
+and two files still cite the dissolved `finish-installation-commands.md`.
+
+**Not verified, recorded so it is not mistaken for verified:** the dock was disconnected, so
+only `eDP-1` enumerated and `lua/monitors.lua` plus the per-monitor workspace `BLOCKS` remain
+untested against the externals; no suspend was taken, so GSP on 615.78.08 is unmeasured; the
+battery sat at 54 % charging, so the 80 % cut-off was not reached; the AC↔battery transition is
+still untried.
+
+---
+
 ## 2026-11-03 — Hyprland 0.57.1 removed `hyprlang`: the config is Lua, with Omarchy's keymap
 
 **The upgrade's reboot came up on upstream's example config.** 0.57.1 **removed** the

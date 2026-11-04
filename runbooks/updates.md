@@ -229,12 +229,12 @@ Check this list after any upgrade that touches the named package.
 
 | Item | Premise | Moves when |
 |---|---|---|
-| i915 NULL deref in `__gen8_ppgtt_clear`; Firefox hardware decode paused in `user.js` | found on kernel **7.0.12** | any `linux-cachyos` bump. It has already moved twice unobserved (7.0.12 → 7.2.8 → 7.3.1 pending) → `gpu-video.md` §12 |
-| `hyprpaper.conf` must use block syntax | parser bug in hyprpaper **0.8.4** | `hyprpaper` 0.8.5 is pending. If fixed, the workaround in `../CLAUDE.md` becomes history → `../ACTUAL-CONFIGURATION.md` §15 |
-| hyprlang → Lua config | deprecated upstream since Hyprland **0.55**; this machine still runs the legacy parser, 0.57.0 pending | see §4 — the largest of these by far |
-| The LTS entry has never been boot-tested | `linux-cachyos-lts` **6.18.52** | 6.18.55 is pending. The escape hatch is upgraded on every cycle and has still never been used → `boot-suspend.md` §0 |
-| NVIDIA GSP "Reset required" after s2idle resume | driver **615.71.09** | `nvidia-utils` 615.78.08 is pending → `boot-suspend.md`, *Issue history* |
-| Fingerprint verify fails 4/4; a patched `libfprint` was considered and not started | `libfprint` **1.94.100** | any `libfprint` bump; and note that a local patch would be **reverted by every `pacman -Syu`** → `fingerprint.md` §20q |
+| i915 NULL deref in `__gen8_ppgtt_clear`; Firefox hardware decode paused in `user.js` | found on kernel **7.0.12** | ⚠ **moved, and three times unobserved**: 7.0.12 → 7.2.8 → **7.3.1, running since the 2026-11-04 reboot**. The premise is two kernels old and the `user.js` pause has never been retested against it → `gpu-video.md` §12 |
+| `hyprpaper.conf` must use block syntax | parser bug in hyprpaper **0.8.4** | ⚠ **moved: `hyprpaper 0.8.5-3.1` is installed** and has been running since the 2026-11-04 reboot. Flat `wallpaper =` lines were never retried against it, so the workaround now rests on a version that is no longer here. Retry one flat line before calling the block syntax a requirement → `../ACTUAL-CONFIGURATION.md` §15 |
+| hyprlang → Lua config | deprecated upstream since Hyprland **0.55** | ✅ **arrived and done** — 0.57.1 removed the parser outright; migrated 2026-11-03 and **cold-boot verified 2026-11-04**. See §4 |
+| The LTS entry has never been boot-tested | `linux-cachyos-lts` **6.18.52** | ⚠ **moved: `6.18.55-2` is installed**, modules present in `/usr/lib/modules`. Upgraded on every cycle and still never booted once — the escape hatch is three versions past the one the note was written for → `boot-suspend.md` §0 |
+| NVIDIA GSP "Reset required" after s2idle resume | driver **615.71.09** | ⚠ **moved: `615.78.08` is running**, module and `nvidia-utils` in parity since the 2026-11-04 reboot. No suspend has been taken on it yet, so the recorded conclusion describes a driver that is no longer loaded and the retest is owed → `boot-suspend.md`, *Issue history* |
+| Fingerprint verify fails 4/4; a patched `libfprint` was considered and not started | `libfprint` **1.94.100** | ✅ **did not move** — `1.94.100-1.1` survived the 662-package upgrade and is still upstream's newest tag, so `patches/libfprint-elan-0c4f-busy-retry.patch` applies unchanged. A local build is still **reverted by every `-Syu`** → `fingerprint.md` §20q, §20x |
 
 ---
 
@@ -349,6 +349,18 @@ instead of silently reading the live ones.
 | `autostart.conf` | `lua/autostart.lua` — `hl.on("hyprland.start", …)` |
 | — | `lua/qconsole.lua`, `lua/bind.lua` (the description-carrying wrapper) |
 | `monitor-mode.sh edp-rate` | `scripts/edp-rate.sh` — same logic, same three guards, applied with `hyprctl eval` |
+
+**Cold-boot measured 2026-11-04.** `hyprctl reload` cannot fire `hl.on("hyprland.start")`
+(§4d), so the autostart path is exercised only by a real session start — and 0.57.1's own
+upgrade reboot came up on *upstream's example config*, before this one existed. The 09:05 boot
+is the first such start this repo has **measured**: `hyprctl configerrors` clean and all
+**twelve** `autostart.lua` entries up — elephant (with the `XDG_SESSION_TYPE` push), walker,
+waybar, mako, hyprpaper, hypridle, hyprpolkitagent, swayosd, both `wl-paste` watchers,
+nm-applet and `power-autoswitch.sh` — with `scripts/edp-rate.sh` resolving 240 Hz off
+`BAT1=Charging`. The three that run as `--user` units (elephant, hyprpolkitagent, swayosd)
+were checked with `systemctl --user is-active`, the rest with `pgrep`. Whether an interim
+logout on 2026-11-03 had already exercised the handler is **not recorded**, so this is the
+first measurement, not provably the first occurrence.
 
 The keymap was not ported but **replaced** with Omarchy's, which has itself migrated to Lua
 (branch `quattro`, all `.lua`) and therefore served as the reference implementation for this
@@ -531,6 +543,54 @@ invariant. It covers what this machine loses *silently*:
 ---
 
 ## Issue history
+
+### 2026-11-04 — the reboot the 662-package upgrade was owed, and the premises it moved
+
+Booted 09:05 on `7.3.1-1-cachyos`. `../tests/check-live-system.sh`: **19 passed, 0 failed**,
+one warning (the 11 `.pacnew`) and six notes. The two FAILs that the 2026-11-03 entry below
+records as "not faults" are **both gone**, as that entry predicted they would be: `dkms
+acer-wmi-battery (running)` and `kernel is the installed one` now PASS on `7.3.1-1-cachyos`.
+The `reboot owed` WARN that explained them is gone with them.
+
+What the reboot **proved**, none of which a `reload` or a live module poke could:
+
+* `predator_v4=Y` after a real `acer_wmi` load, `platform_profile` present, `acer` hwmon at
+  `hwmon5`, `health_mode=1` — the forced module parameter survives a boot, which is the only
+  way it is ever set (`0444`, load-time only). `power-battery.md` §17.
+* `nvidia` module and `nvidia-utils` both **615.78.08**: the version lock held across the
+  upgrade, so KMS came up and Hyprland did not black-screen.
+* The Lua config's `hyprland.start` handler fires on a cold boot — §4c.
+* The only warning in the boot journal is the already-documented benign `DP-0` EDID line.
+
+What it **moved**, and this is the part §3 exists for: four of that table's six rows now
+describe versions that are not loaded any more — kernel 7.3.1 (i915), hyprpaper 0.8.5, NVIDIA
+615.78.08 (GSP), `linux-cachyos-lts` 6.18.55. None of the four conclusions was re-measured;
+each is now a note about a version this machine no longer runs. `libfprint` is the one that
+held still, which is the only reason `patches/` still applies.
+
+What the reboot did **not** clear, in the order the dependency chain forces:
+
+1. The **11 `.pacnew`** are untouched. `/etc/pam.d/sudo.pacnew` was diffed and is exactly as
+   §2a describes: it drops `auth sufficient pam_fprintd.so # chwd-fprintd` (keep it) and adds
+   `session optional pam_systemd.so class=none` (adopt it).
+2. `meson`, `gobject-introspection`, `gtk-doc`, `umockdev` — still **none installed**, so the
+   libfprint patch is still unbuilt. `hyprpicker` is still missing too, and one
+   `paru -Syu --needed` closes both. 2 ordinary updates pending (chrome 157, vscode 1.145).
+3. The **rollback path still has never booted** — `linux-cachyos-lts` 6.18.55 is installed
+   with its modules in place and remains unexercised. `boot-suspend.md` §0.
+4. **Three mirrored files drifted, repo → live**, comments only and no behaviour: the live
+   `/etc/modprobe.d/acer-wmi-predator-v4.conf` is still the **Spanish** draft the repo
+   replaced with English, and it plus `/etc/modprobe.d/acer-wmi-battery.conf` and the
+   now-inert `~/.config/hypr/env.conf` still cite the dissolved
+   `finish-installation-commands.md`. The repo copy is the correct one in all three cases, so
+   this is a push: `sudo install -Dm644` for the two under `/etc/modprobe.d/`. The live-system
+   check reports these as notes, not failures, which is why they survived the restructure.
+
+Not verifiable from this boot, and recorded as such so it is not mistaken for verified: the
+dock was disconnected (only `eDP-1` enumerated), so `lua/monitors.lua` and the per-monitor
+workspace `BLOCKS` are still untested against the externals; no suspend has been taken, so
+GSP on 615.78.08 is unmeasured; the battery was at 54 % charging, so the 80 % cut-off was not
+reached; and the AC↔battery **transition** is still untried.
 
 ### 2026-11-03 — the first upgrade through this procedure, and the two FAILs that are not faults
 

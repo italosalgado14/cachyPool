@@ -12,10 +12,10 @@ grow this file with incident write-ups — those go in the runbook and `CHANGELO
 `cachyPool` is **not a software project** — it is documentation plus a dotfile mirror for a
 single machine (Acer Predator PT516-52s, hostname `triton500se`) running **CachyOS +
 Hyprland on Wayland with NVIDIA**. There is no build, test, or lint pipeline. The one
-exception is `triton-panel/`, which is real source (a GTK4 app). Five regression tests:
+exception is `triton-panel/`, which is real source (a GTK4 app). Six regression tests:
 `triton-panel/test-enroll.py`, `triton-panel/test-battery.py`,
-`tests/test-power-autoswitch.sh`, `tests/check-doc-refs.sh` and
-`tests/check-live-system.sh`. Run them when you touch what they cover. The Python ones must
+`tests/test-power-autoswitch.sh`, `tests/check-doc-refs.sh`,
+`tests/check-live-system.sh` and `tests/check-libfprint-patch.sh`. Run them when you touch what they cover. The Python ones must
 be run from inside `triton-panel/`.
 
 ## Documentation structure — scope, not rank
@@ -99,8 +99,10 @@ Plus three sibling daemons with their own, still-hyprlang configs: `hyprpaper.co
   `SUPER + Q` alive. That plus
   `cp /usr/share/hypr/hyprland.lua ~/.config/hypr/hyprland.lua && hyprctl reload` is the
   rollback.
-- **`hyprpaper.conf` needs block syntax**, not flat `wallpaper = ...` lines — the installed
-  0.8.4 has a config-parser bug and flat lines render **nothing, silently**. See
+- **`hyprpaper.conf` needs block syntax**, not flat `wallpaper = ...` lines — a config-parser
+  bug renders flat lines as **nothing, silently**. ⚠ The bug was found on 0.8.4 and the
+  installed version has since moved, with no retry; which version is live, and whether the
+  workaround is still needed, is in `runbooks/updates.md` §3 — do not re-derive it here. See
   `configs/hypr/hyprpaper.conf` and the `Hyprpaper wallpaper binding` row in
   `ACTUAL-CONFIGURATION.md` §15.
 
@@ -239,8 +241,8 @@ bytes `0x00` ("not ready") and `0xaf` ("finger removed or sensor busy") are retr
 when `dev_type == ELAN_0C58` and are a **fatal** `FP_DEVICE_ERROR_PROTO` for `0c4f`, which
 carries no quirk bit. `patches/libfprint-elan-0c4f-busy-retry.patch` fixes it and is
 ⚠ **not applied** — building needs `meson`, `gobject-introspection`, `gtk-doc` and
-`umockdev`, still not installed. The full `paru -Syu` ran 2026-11-03 (662 packages, kernel
-7.3.1), so what is owed is the **reboot**, then
+`umockdev`, **none of them installed**. The upgrade ran 2026-11-03 and its reboot landed
+2026-11-04, so the only step owed is
 `paru -Syu --needed meson gobject-introspection gtk-doc umockdev`. The upgrade left
 `libfprint` at 1.94.100, which is also upstream's **newest tag**, so the hunks still apply
 and no *released* version carries this fix (upstream's default branch was never checked — the

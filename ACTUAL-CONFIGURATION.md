@@ -525,7 +525,7 @@ when resolved; never delete one.
 | Hyprland NVIDIA black-screen | ✅ Resolved (KMS + env vars) |
 | Hyprland autostart daemons | ✅ All running (polkit fixed via systemd unit; hypridle started; nm-applet installed) |
 | Waybar Catppuccin config | ✅ Applied (`~/.config/waybar/config.jsonc` + `style.css`) |
-| Hyprpaper wallpaper binding | ✅ Resolved via block syntax (workaround for 0.8.4 config parser bug — see GitHub hyprwm/hyprpaper#204 + Arch forum thread) |
+| Hyprpaper wallpaper binding | ✅ Resolved via block syntax — ⚠ but **the premise moved**: `hyprpaper 0.8.5-3.1` has been running since 2026-11-04 and flat lines were never retried against it (`runbooks/updates.md` §3). (Workaround for the 0.8.4 config parser bug — see GitHub hyprwm/hyprpaper#204 + Arch forum thread) |
 | Hyprlock styling | ✅ Catppuccin theme applied |
 | Hypridle timeouts | ✅ Configured (5/10/20 min). **2026-07-12:** the 20-min suspend listener is now **battery-only** (`grep -q Discharging /sys/class/power_supply/BAT1/status && systemctl suspend` → `runbooks/boot-suspend.md`, *Issue history* |
 | qt6ct env var | ✅ Package installed, env var valid |
@@ -553,12 +553,12 @@ when resolved; never delete one.
 | Fingerprint unlock dies ~3 min into every lock | ⚠ Open 2026-11-03 — measured, no finger involved → `runbooks/fingerprint.md` §20t, *Issue history* |
 | Panel scored an untouched pad every 10 s | ✅ **Resolved 2026-11-03** — presence measured, counting rule moved → `runbooks/fingerprint.md` §20u, *Issue history* |
 | Fingerprint **verify** fails 7/7 | ⚠ Open 2026-11-03 — all `no-match` with minutiae extracted, so it is the template → `runbooks/fingerprint.md` §20m, §20q, §20u, *Issue history* |
-| ⚠ **Enrolment blocked: protocol error between stages** | ⚠ Open 2026-11-03 — **cause found in `elan.c`**: the sensor's documented `0x00`/`0xaf` ("not ready" / "finger removed or sensor busy") are retried only for `ELAN_0C58` and are fatal for `0c4f`. Patch written, **not applied** — the 2026-11-03 upgrade ran, so what is owed is the reboot and four build packages → `patches/README.md`, `runbooks/fingerprint.md` §20w, §20x |
+| ⚠ **Enrolment blocked: protocol error between stages** | ⚠ Open 2026-11-03 — **cause found in `elan.c`**: the sensor's documented `0x00`/`0xaf` ("not ready" / "finger removed or sensor busy") are retried only for `ELAN_0C58` and are fatal for `0c4f`. Patch written, **not applied** — the upgrade ran 2026-11-03 and the reboot landed 2026-11-04, so all that is owed now is `paru -Syu --needed meson gobject-introspection gtk-doc umockdev` (none of the four is installed) → `patches/README.md`, `runbooks/fingerprint.md` §20w, §20x |
 | ⚠ **Zero prints enrolled** | ⚠ Open 2026-11-03 — the 6/6 print was destroyed by starting an enrolment into its own slot; hyprlock switch turned itself **off** when the last print went → `runbooks/fingerprint.md` §20v, *Issue history* |
 | Enroll window blocked its own recovery (Calibrate with no print, false "not claimed", log lost under Walker) | ✅ **Resolved 2026-11-03** → `runbooks/fingerprint.md` §20v, *Issue history* |
 | Same-press gate swallowed driver faults + the thermal lockout | ✅ **Resolved 2026-11-03** → `runbooks/fingerprint.md` §20v, *Issue history* |
-| i915 NULL deref in `__gen8_ppgtt_clear` during GPU-hang recovery | ⚠ Open → `runbooks/gpu-video.md`, *Issue history* |
-| NVIDIA GSP "Reset required" after s2idle resume | ⚠ Open → `runbooks/boot-suspend.md`, *Issue history* |
+| i915 NULL deref in `__gen8_ppgtt_clear` during GPU-hang recovery | ⚠ Open — ⚠ **premise moved**: found on kernel 7.0.12, now three kernels back (7.3.1 since 2026-11-04), never re-measured → `runbooks/gpu-video.md`, *Issue history*; `runbooks/updates.md` §3 |
+| NVIDIA GSP "Reset required" after s2idle resume | ⚠ Open — ⚠ **premise moved**: recorded on driver 615.71.09, **615.78.08** running since 2026-11-04 with no suspend taken on it yet → `runbooks/boot-suspend.md`, *Issue history*; `runbooks/updates.md` §3 |
 | VLC not installed (video playback) | ✅ Resolved 2026-07-31 → `runbooks/gpu-video.md`, *Issue history* |
 | Compositor renders on the Intel iGPU, not the dGPU | ℹ️ Discovery 2026-07-02 → `runbooks/gpu-video.md`, *Issue history* |
 | Discord screen share can't capture the screen / Wayland windows | 🔧 Fix applied 2026-09-28, pending a live share test → `runbooks/desktop-apps.md`, *Issue history* |
@@ -568,11 +568,12 @@ when resolved; never delete one.
 | Monitor layouts only editable as hand-written coordinates | ✅ Resolved 2026-10-15/16. → `runbooks/monitors.md`, *Issue history* |
 | No fan RPM and no platform profile on this model | ✅ **Resolved 2026-10-31, reboot-verified 2026-11-03** — `predator_v4`=`Y` after a real boot, 5 profile states, `acer-isa-0ace` reading fans and temps, ppd mapping confirmed → `runbooks/power-battery.md` §17 |
 | All of this only reachable from a terminal | ✅ **Resolved 2026-10-31, fully installed 2026-11-03** — the last outstanding piece, the sudoers rule, is live (`sudo -ln`) → `runbooks/triton-panel.md` §18 |
-| Update backlog and `.pacnew` drift | ⚠ **Open 2026-11-03, partly cleared the same day.** ✅ The backlog is gone — `paru -Syu` moved **662 packages** at 18:47 (kernel 7.3.1, NVIDIA 615.78.08); ✅ `paccache.timer` enabled. ⚠ Still open: the **reboot** the new kernel needs, **11 `.pacnew`** unmerged — none added by this upgrade; the one that matters is `/etc/pam.d/sudo.pacnew` (2026-06-17, owned by `sudo`), which drops the `pam_fprintd` line — `snap-pac` at defaults so the kernel snapshot has no protected quota, and the rollback path still **never once booted**. *Found 2026-11-03: 648 pending, last upgrade 2026-09-26, 12 `.pacnew` with the oldest from April 2026.* → `runbooks/updates.md` |
+| Update backlog and `.pacnew` drift | ⚠ **Open 2026-11-03, mostly cleared since.** ✅ The backlog is gone — `paru -Syu` moved **662 packages** at 18:47 (kernel 7.3.1, NVIDIA 615.78.08); ✅ `paccache.timer` enabled; ✅ **the reboot landed 2026-11-04 09:05** — 19 pass / 0 fail, and it moved four of `runbooks/updates.md` §3's premises. ⚠ Still open: **11 `.pacnew`** unmerged — none added by this upgrade; the one that matters is `/etc/pam.d/sudo.pacnew` (2026-06-17, owned by `sudo`), which drops the `pam_fprintd` line — `snap-pac` at defaults so the kernel snapshot has no protected quota, and the rollback path still **never once booted**. *Found 2026-11-03: 648 pending, last upgrade 2026-09-26, 12 `.pacnew` with the oldest from April 2026.* → `runbooks/updates.md` |
 | Hyprland is retiring `hyprlang` for a Lua config | ✅ **Resolved 2026-11-03** — 0.57.1 removed the parser; the config is now `hyprland.lua` + `lua/*.lua`, with Omarchy's keymap. Three of this repo's own predictions were wrong → `runbooks/updates.md` §4, §4g |
 | ⚠ **Monitor profile system parked by the Lua migration** | ⚠ Open 2026-11-03 — 12 `hyprctl keyword` call sites to port; `lua/monitors.lua` is the static geometry meanwhile → `runbooks/monitors.md` §16 |
+| ⚠ **Three mirrored files drifted, repo → live** | ⚠ Open 2026-11-04 — live `/etc/modprobe.d/acer-wmi-predator-v4.conf` is still the **Spanish** draft, and it plus `acer-wmi-battery.conf` and the (now inert) `~/.config/hypr/env.conf` still cite the dissolved `finish-installation-commands.md`. Comments only, no behaviour: push the repo copies with `sudo install -Dm644` → `runbooks/updates.md`, *Issue history* |
 | ⚠ **The new monitor config is unverified with the externals** | ⚠ Open 2026-11-03 — the dock was disconnected all migration; only eDP-1 was exercised → `runbooks/monitors.md` §21 |
-| `hyprpicker` missing for the new `Super+Print` bind | ⚠ Open 2026-11-03 — waits for the next full `paru -Syu` → `runbooks/updates.md` §1 |
+| `hyprpicker` missing for the new `Super+Print` bind | ⚠ Open 2026-11-03, still missing after the 2026-11-04 reboot — rides along with the libfprint build deps in one `paru -Syu --needed` → `runbooks/updates.md` §1 |
 
 ---
 
