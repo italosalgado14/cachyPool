@@ -231,7 +231,18 @@ Everything the parameter adds disappears; hotkeys, rfkill and the battery cap ar
 
 ---
 
-## 19. Automatic power saving by power source — ✅ APPLIED 2026-10-31
+## 19. Automatic power saving by power source — ✅ APPLIED 2026-10-31, re-homed 2026-11-03
+
+> **2026-11-03 — the rate's owner moved out of `monitor-mode.sh`.** Hyprland 0.57.1 removed
+> `hyprctl keyword`, which parked that whole script (`monitors.md` §16), so `edp_mode()` and
+> the `edp-rate` hook were lifted verbatim into **`scripts/edp-rate.sh`** — same two modes,
+> same `Discharging` test, same pref file, same three guards — with the apply changed to
+> `hyprctl eval 'hl.monitor({output = "eDP-1", mode = …, position = …, scale = …})'`.
+> `power-autoswitch.sh` now calls `"$RATE_SCRIPT"` where it called `"$MODE_SCRIPT" edp-rate`;
+> nothing else in its logic moved and `tests/test-power-autoswitch.sh` still passes 10/10.
+> **Verified end to end on battery the same day:** `hyprctl reload` put eDP-1 back to 240 Hz
+> from `lua/monitors.lua`, and the next tick of the loop took it to 60 Hz with the platform
+> profile at `low-power`. Read every "`monitor-mode.sh`" below as "`edp-rate.sh`".
 
 On battery the machine now drops the laptop panel to 60 Hz and switches the
 platform profile to `power-saver`; on AC it restores 240 Hz and the profile that
@@ -254,7 +265,7 @@ was therefore undone by the next profile apply, hotplug autoswitch or
 So the rate is now resolved in one place:
 
 ```bash
-# monitor-mode.sh
+# scripts/edp-rate.sh   (was monitor-mode.sh's edp_mode() until 2026-11-03)
 edp_mode() { if power_auto && on_battery; then printf %s "$EDP_LO"; else printf %s "$EDP_HI"; fi; }
 ```
 
@@ -277,13 +288,12 @@ holding on AC) must count as AC.
 
 ```bash
 cd ~/code/cachyPool
-cp configs/hypr/scripts/monitor-mode.sh      ~/.config/hypr/scripts/monitor-mode.sh
-cp configs/hypr/scripts/power-autoswitch.sh  ~/.config/hypr/scripts/power-autoswitch.sh
-chmod +x ~/.config/hypr/scripts/power-autoswitch.sh
-cp configs/hypr/autostart.conf               ~/.config/hypr/autostart.conf   # adds the exec-once
+install -m755 configs/hypr/scripts/edp-rate.sh        ~/.config/hypr/scripts/edp-rate.sh
+install -m755 configs/hypr/scripts/power-autoswitch.sh ~/.config/hypr/scripts/power-autoswitch.sh
+install -m644 configs/hypr/lua/autostart.lua           ~/.config/hypr/lua/autostart.lua  # starts the loop
 install -Dm755 triton-panel/triton-panel     ~/.local/bin/triton-panel
 
-# exec-once does NOT re-run on a reload, so start it once for this session:
+# hl.on("hyprland.start") does NOT re-fire on a reload either, so start it once by hand:
 ~/.config/hypr/scripts/power-autoswitch.sh &
 ```
 

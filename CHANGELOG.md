@@ -21,6 +21,480 @@ remediation doc are findable either way: `grep -rn '§N' runbooks/ archive/`.
 
 ---
 
+## 2026-11-03 — Hyprland 0.57.1 removed `hyprlang`: the config is Lua, with Omarchy's keymap
+
+**The upgrade's reboot came up on upstream's example config.** 0.57.1 **removed** the
+`hyprlang` parser. With no `hyprland.lua` present it writes `/usr/share/hypr/hyprland.lua`
+into `~/.config/hypr/` and runs that, so the session had no bar, no wallpaper, no keybinds,
+one monitor, none of `env.conf`'s variables — and `hyprctl configerrors` clean the whole
+time. The 13-file `.conf` tree was read by nobody. `Super+M`, which this machine binds to a
+monitor profile, was `exit` in the example.
+
+What the evidence was: `[cfg] Regular config at …/hyprland.lua` + `No config file found;
+attempting to generate` where 0.56.2 logged `using legacy config at …/hyprland.conf`;
+`Hyprland --verify-config -c hyprland.conf` answering `hyprland.conf:2: unexpected symbol
+near '/'` (the explicit path goes to the **Lua** parser, so there is no way back);
+`strings /usr/bin/Hyprland` without `using legacy config` but with `RIP hyprlang`; and
+`hyprctl keyword` answering **`unknown request`** rather than 0.56's "use eval".
+
+**Migrated the same evening, keymap replaced rather than ported.** Omarchy has itself moved
+to Lua (branch `quattro`, every file `.lua`), so its config served as the reference
+implementation for this binary, and its shortcut system was adopted deliberately:
+
+- `configs/hypr/hyprland.lua` + `configs/hypr/lua/*.lua` — 13 modules in the same shape as
+  the old split. The entrypoint derives `package.path` from its own location, so
+  `Hyprland --verify-config -c <repo>/configs/hypr/hyprland.lua` verifies the repo's modules
+  and not the live ones. It prints `config ok` and is the gate before every push.
+- **137 binds, 118 of them described** (the old `keybindings.conf` had 58 `bind*` lines). `lua/bind.lua` carries a `description` into
+  `hyprctl binds -j`, and `scripts/show-shortcuts.sh` now **generates** the `Super+K`
+  cheatsheet from it, so the cheatsheet cannot drift from the binds again.
+- Adopted from Omarchy: Quake console (`Super+grave`), scratchpad (`Super+S`), window groups
+  (`Super+G`), Alt+Tab cycling, three-scale keyboard resize on `Super+-`/`=`, workspace and
+  window moves across monitors, `Super+Tab` per-monitor workspace walking, swap instead of
+  move on `Super+Shift+arrows`, maximize on `Super+Alt+F`, screen zoom, colour picker,
+  notification control through `makoctl`, transparency and gaps toggles, the clamshell lid
+  bind, and the universal clipboard on `Super+C/V/X/A` (floating moved to `Super+T`).
+- **Workspaces are per monitor** — ten slots per panel, blocks anchored by EDID
+  (`runbooks/monitors.md` §21). Omarchy's own 713-line implementation was *not* imported:
+  its tie-break orders by connector name, which is what rotates between `DP-1`/`DP-2` here.
+- Decided: lock moved to `Super+Ctrl+L` with `Super+L` left free; `Super+M` minimizes and the
+  monitor chords moved to Omarchy's display slots; `Super+Ctrl+Delete` toggles the laptop
+  panel natively.
+
+**Parked, not deleted:** `monitor-mode.sh` (five profiles, `apply_monitor_tf`),
+`monitor-autoswitch.sh`, `monitor-menu.sh`, `hyprmon-edit.sh` — all of them apply through
+`hyprctl keyword`. `lua/monitors.lua` is the only owner of geometry meanwhile. The one piece
+that could not wait was lifted out verbatim into **`scripts/edp-rate.sh`**: eDP-1's refresh
+rate following the power source, now applied with `hyprctl eval 'hl.monitor({…})'`.
+`power-autoswitch.sh` calls it and `tests/test-power-autoswitch.sh` still passes 10/10.
+
+**Verified live:** `config ok`; `configerrors` clean; 137 binds registered including the
+`switch:` lid binds and all 47 keycode binds; `cursor:no_hardware_cursors` back to `1`;
+`tests/check-live-system.sh` **19 passed, 0 failed** (was 18/1 — hyprpaper was the failure);
+`check-doc-refs.sh` 0 errors. And the power chain end to end on battery: `hyprctl reload`
+restored 240 Hz from `lua/monitors.lua`, the next tick took eDP-1 to 60 Hz and the platform
+profile to `low-power`.
+
+**Measured, and worth knowing:** a write to a `.lua` does **not** auto-reload anything (what
+hyprlang did); `hyprctl reload` does **not** re-fire `hl.on("hyprland.start")`, so no daemon
+duplicates and none restarts; a wrong config key is accepted in silence, so
+`/usr/share/hypr/stubs/hl.meta.lua` is the only ground truth; the dispatchers are untyped
+there, so `hl.dsp.window.set_prop({prop = "alpha"})` had to be tested to find out it answers
+*Invalid prop name*; punctuation keysyms need lower case (`grave`, `slash`, `comma`).
+
+⚠ **Not verified:** the dock (Plugable TBT4-UD5) was `disconnected` throughout, so the two
+`desc:` monitor rules and the 11–20 / 21–30 workspace blocks have never been seen to bind.
+⚠ `hyprpicker` for the new `Super+Print` is not installed — it waits for the next full
+`paru -Syu`. ⚠ Three predictions this repo had written down about the migration were wrong;
+they are kept and retracted in `runbooks/updates.md` §4g, the most useful being that Lua
+*does* expose monitor hotplug events, so the autoswitcher can become a Lua handler.
+
+→ `runbooks/updates.md` §4, `runbooks/monitors.md` §16 / §21,
+`runbooks/power-battery.md` §19, `shortcuts.md` §1
+
+## 2026-11-03 — Upgrade: 662 packages, kernel 7.3.1, NVIDIA 615.78.08 — ⚠ reboot owed
+
+First full upgrade since **2026-09-26** — the five-week gap
+`runbooks/updates.md` §1 warns about. `paru -Syu` started 18:47:56 and moved
+**662 packages**, with the whole version-locked set in one transaction:
+
+| package | from | to |
+|---|---|---|
+| `linux-cachyos` + `-headers` | 7.2.8-1 | **7.3.1-1** |
+| `linux-cachyos-nvidia-open` | 7.2.8-1 | **7.3.1-1** |
+| `nvidia-utils` | 615.71.09-1 | **615.78.08-2** |
+| `nvidia-settings` | 615.71.09-1 | 615.78.08-1 |
+| `linux-cachyos-lts` + `-headers` + `-nvidia-open` | 6.18.52-1 | 6.18.55-2 |
+| `pam` | 1.7.2-2.1 | 1.7.3-1.1 |
+
+⚠ **The pre-reboot gate reports two FAILs and both are the expected
+post-upgrade state, not breakage.** Neither is to be "fixed" by installing
+anything — that is the partial upgrade `CLAUDE.md` forbids:
+
+- `dkms acer-wmi-battery (running) — not installed for 7.2.8-1-cachyos`. The
+  transaction replaced the running kernel's module tree: `/usr/lib/modules`
+  now holds only `6.18.55-2-cachyos-lts` and `7.3.1-1-cachyos`. `dkms status`
+  reports the module **built and installed for both**, so nothing needs
+  rebuilding. ⚠ And the cap is **not** dead meanwhile: `acer_wmi_battery` is
+  still loaded from before the upgrade and
+  `/sys/bus/wmi/drivers/acer-wmi-battery/health_mode` reads `1` in the same
+  report. What is impossible until the reboot is *reloading* it. The checker's
+  FAIL text ("the charge cap is dead") is written for the unloaded case and
+  overstates this one.
+- `nvidia module 615.71.09, package 615.78.08 — partial upgrade`. The loaded
+  module is the old one because the new one cannot load into the running
+  kernel. This is what every kernel + NVIDIA upgrade looks like until reboot.
+
+**The upgrade produced no new `.pacnew` at all** — the newest of the 11 pending
+is dated 2026-10-17. They are the audit's backlog, minus
+`cachyos-mirrorlist.pacnew`, which is no longer on disk; when that one went is
+not recorded. ⚠ The one that matters most is `/etc/pam.d/sudo.pacnew` (dated
+**2026-06-17**, owned by `sudo`, not by `pam`): it **drops**
+`auth sufficient pam_fprintd.so # chwd-fprintd` and **adds**
+`session optional pam_systemd.so class=none`. A `mv` would silently end
+fingerprint `sudo`; the merge is `DIFFPROG='vim -d' pacdiff -s -3` and the
+keep/take split was already tabulated in `runbooks/updates.md` §2a.
+
+`libfprint` and `fprintd` were **not** upgraded — still `1.94.100-1.1` and
+`1.94.5-2.1` — so §20x's patch still applies to the installed source exactly as
+verified. 1.94.100 is also upstream's **newest tag**, so no upgrade was ever
+going to deliver that fix.
+
+`runbooks/updates.md` *Issue history* has the pending list and the post-reboot
+checklist.
+
+---
+
+## 2026-11-03 — Fingerprint: the cause is three lines in libfprint's elan driver
+
+Reading the driver was cheaper than measuring it. `elan.c`'s
+`capture_run_state` has exactly **one** `FP_DEVICE_ERROR_PROTO` site, and the
+retry that avoids it is gated on `dev_type == ELAN_0C58`:
+
+```c
+else if (self->dev_type == ELAN_0C58 && self->last_read &&
+         (self->last_read[0] == 0x00 || self->last_read[0] == 0xaf))
+  /* 0x00 - not ready
+   * 0xaf - finger removed or sensor busy (seen on 0x0c58) */
+  fpi_ssm_jump_to_state_delayed (ssm, CAPTURE_WAIT_FINGER, 10);
+```
+
+⚠ `0c4f` carries no quirk bit, so for this reader those two **documented,
+transient** status bytes become a fatal protocol error. `0xaf` is literally
+*"finger removed or sensor busy"* — which is the state the sensor is in
+between two enrolment stages, and it is why the reported symptom was *"al
+levantar el dedo la borra"*. It also explains why calibration survives the
+same error rate (each verify is independent, nothing to discard) while
+enrolment cannot (one operation across six captures, discarded whole), and why
+the 6/6 of 2026-11-01 logged zero protocol errors — the sensor happened to be
+ready at all six transitions.
+
+`patches/libfprint-elan-0c4f-busy-retry.patch` gives `0c4f` a unique
+`driver_data` bit and lets it take the same retry — **not** widened to all
+devices, which would change behaviour for untestable hardware. Every
+`dev_type` site was audited against the new bit and the audit is a test,
+`tests/check-libfprint-patch.sh`, because that is the failure that would be
+silent: 7 passed, 0 failed, and the patch applies cleanly to a pristine
+v1.94.100. ⚠ The `FP_SCAN_TYPE_SWIPE` change §20q has wanted since the eighth
+pass was deliberately **not** bundled — it addresses the separate
+`No minutiae found` thread, and two changes at once make the result
+uninterpretable.
+
+⚠ **Nothing was applied.** Building needs `meson`,
+`gobject-introspection`, `gtk-doc` and `umockdev`, none installed, and
+installing them against a refreshed database is the partial upgrade `CLAUDE.md`
+forbids while an upgrade backlog is outstanding. So the order is: the
+pre-upgrade gate, `paru -Syu`, the reboot, then the build — and the first
+build should be tested through a drop-in under `/run` (tmpfs; a reboot undoes
+it) rather than by installing a package. `patches/README.md` has the commands
+and the rollback. The patch is **not compiled**: `fpi-enums.h` is generated by
+meson. New top-level `patches/` directory, whose first rule is that nothing in
+it is applied. `runbooks/fingerprint.md` §20x.
+
+---
+
+## 2026-11-03 — Fingerprint: the blocker is a protocol error *between* stages
+
+The log file added hours earlier paid for itself in one read. Reported as
+*"solo me acepta la primera ingresada y al levantar el dedo la borra"*, and
+that is exactly it — ten cycles in 44 s:
+
+```
+stage:  Accepted — stage 1 of 6, 1.29s of contact
+driver: Reader cut off
+info:   Restarted enrollment (N) — fprintd discarded 1 stage(s)
+```
+
+**stage 2 was never reached once.** Journal for the same window: 7 ×
+`during enroll` protocol error, 3 × `during identify for enroll`, 6 ×
+`No minutiae found`. Contact was 1.20–1.40 s throughout and six stages were
+*accepted*, so capture is not what fails here: the enrolment cannot survive
+the gap between two stages. fprintd writes the print only on completion, so
+one fault discards the whole partial template and the restart loop begins at
+stage 1.
+
+⚠ Not *on the lift*, though it feels that way: the accept is logged at the
+lift and two faults arrived 5 s after it. What they share is landing while the
+driver **arms the next capture on an empty pad** — the state §20j saw
+transition invalidly — but that line is debug level and **absent** from this
+journal, so it is a hypothesis, not the mechanism. ⚠ This does explain the 6/6
+of 2026-11-01 completely: that run logged **zero** protocol errors, so the
+restart loop never fired. Device state, not technique.
+
+Also found in fprintd's source: the duplicate `fp_device_identify` that runs
+before every `enroll_start` is gated on
+`fp_device_has_feature(FP_DEVICE_FEATURE_IDENTIFY)` **alone**, with no check
+that any print exists — so each restart costs a full extra device operation,
+and 3 of the 10 faults came from it.
+
+Applied: `MAX_STALLED_RESTARTS = 3` in Triton Panel, firing only when exactly
+one stage was ever reached — not zero (the 6/6 run needed the loop to survive
+faults *before* any stage passed) and not more (that is the intermittent case
+`MAX_RESTARTS` covers). Its message names the layer and points at
+`./fp-debug.sh press`, deliberately **not** at `rebind`: nothing is wedged
+when the captures are being accepted. The first draft used `<= 1` and two
+existing tests caught it.
+
+⚠ Next step, and the only one worth taking first: **`./fp-debug.sh press` with
+`G_MESSAGES_DEBUG=all`**, unrun since §20j. After that, and only after,
+`FP_SCAN_TYPE_PRESS` for `elan` (§20q) is the best-motivated candidate it has
+ever been, with the smallest blast radius it has ever had — the hyprlock block
+is gone and password auth is on.
+
+`test-enroll.py` 282 → **303 assertions, all passing**; `test-battery.py`
+passing; widgets re-smoked; doc refs 0 errors; `check-live-system.sh` 19
+passed, 0 failed. No live configuration changed by this pass.
+`runbooks/fingerprint.md` §20w.
+
+---
+
+## 2026-11-03 — Fingerprint: starting an enrolment deletes the print in that slot
+
+⚠ **There are now zero prints enrolled.** The 6/6 print of 2026-11-01 was lost
+at 17:16:23, and what took it was **starting an enrolment into its own slot**.
+Read in fprintd 1.94.5's `src/device.c` rather than inferred —
+`fprint_device_enroll_start` does `store.print_data_load` and, if a print
+exists, `delete_enrolled_fingers` → `store.print_data_delete`, **before the
+first stage**; the new print is written only on completion, in `enroll_cb` via
+`store.print_data_save`. So an enrolment that is abandoned or that fails leaves
+the slot **empty**. The evidence chain: the calibration logged `Scoring against
+— Right index` until 17:16:17 (that string comes from `VerifyFingerSelected`,
+so the print existed), the enrolment started at 17:16:23, and no stage, no
+`during enroll` journal line and no crash followed. Not a manual delete —
+that path removes the hyprlock block, which is still live with
+`enabled = true`. Triton Panel's occupied-slot warning had said enrolling
+*"OVERWRITES"* the slot, which reads as *on success*; it now names both source
+calls and says the deletion happens at the start. ⚠ Remaining live state:
+**zero prints with the hyprlock switch still on** — a pairing the panel's own
+delete path forbids. `pam_fprintd` stays `sufficient` and with no print falls
+straight through, so `sudo` no longer waits on the reader. A confirmation
+dialog for an occupied slot is the obvious hardening and was **not** built
+unasked.
+
+The same session exposed a defect in the tenth pass. §20s's *"is this a new
+press?"* gate never excluded bucket `driver`, so across 32 s **every**
+suppression was a `verify-disconnected`: it caught no repeat press at all, told
+the user to lift a finger off a reader that had stopped reading, kept
+`_cal_dry` at zero so `MAX_CAL_DRY` could not fire, and ⚠ **hid the thermal
+lockout** — that check lives in the terminal `driver` branch below the gate's
+`return`, so a cooldown with a finger resting on the pad would have spun for
+the whole 215 s saying *"lift the finger clear"* and never entered it. It was
+invisible to 246 assertions because every existing test of the gate fed it a
+placement result. Fixed with one predicate gating both suppression branches
+**and** the press-evidence reset; driver faults now reach the tally, so a storm
+is visible instead of hidden behind a single line.
+
+What the session proved about the hand: of 13 counted attempts **6 scored** and
+all 6 were `verify-no-match` — the same finger below threshold against its own
+template six times, so re-enrolling was right and nothing usable was lost; but
+**7 of 13 never reached the matcher**, so the ~1 cm capture ceiling is still
+there and re-enrolling addresses the template only.
+
+The recovery attempt then hit three more defects, all now fixed. **(a)** With
+zero prints the window still offered **Calibrate**, as the *suggested* action,
+although calibration is a verify loop fprintd refuses outright
+(`NoEnrolledPrints` — hit five times in 12 s) and the failure branch answered
+*"the reader may be wedged — run ./fp-debug.sh rebind"*, which is sending
+someone to reset a USB endpoint over empty storage. **(b)** Opening the Enroll
+window and closing it without pressing anything fired `EnrollStop` + `Release`
+at an unclaimed device, because the guard was `not self._released`, which
+starts `False` and conflates *"we hold a claim"* with *"we never claimed one"*;
+fprintd logged `Device was not claimed before use` twice. **(c)** ⚠ The attempt
+log now goes to a **file** — `$XDG_STATE_HOME/triton-panel/panel-<ts>.log`,
+`TRITON_PANEL_LOG_DIR` to override, path shown in the window — because stderr
+reaches no journal when Walker starts the panel. Two sessions this day left no
+trace anywhere, so whether either completed a working enrolment before the
+`DeleteEnrolledFingers` at 17:40:27 is permanently unknowable: fprintd is
+silent for an accepted enrol stage, and the only other witness was discarded.
+
+⚠ **Live configuration did change, by the panel's own hand:** that delete took
+the last print, so `_on_fp_delete` turned the hyprlock fingerprint switch
+**off** and removed the managed block from `~/.config/hypr/hyprlock.conf`. The
+lock screen no longer invites a finger it cannot read.
+`configs/hypr/hyprlock.conf` has been pulled back to match.
+
+`test-enroll.py` 246 → **282 assertions, all passing**; `test-battery.py`
+passing; widgets re-smoked; `check-live-system.sh` 19 passed, 0 failed.
+`runbooks/fingerprint.md` §20v.
+
+---
+
+## 2026-11-03 — Fingerprint: the ten-second phantom was never a finger
+
+The entry below found a `verify-swipe-too-short` arriving every **10 s on an
+empty pad** and deliberately left the counting rule alone, because one unrun
+measurement decided whether such a result means *"nobody touched"* or *"this
+reader cannot report contact"*. It was run — `triton-panel/fp-debug.sh presence`,
+40 s, one finger — and the separation is total:
+
+| | real touch | phantom |
+|---|---|---|
+| count | 4 | 2 |
+| `finger-present` before the result | **4 of 4** | **0 of 2** |
+| spacing | when the finger landed | **10.17 s / 10.03 s** (`ELAN_CMD_TIMEOUT 10000`) |
+| `journalctl -u fprintd` | `Failed to detect minutiae` | **nothing** |
+
+So the rule moved on a measurement, not on an inference. Triton Panel now keeps
+a `*-swipe-too-short` with no `finger-present` ON edge out of the rolling
+window, the tally, the attempt count and the strip, in **both** the calibration
+and the enrolment path — the latter mattered more than a bad score, because its
+repeats counter had been turning three phantoms on an untouched pad into *"the
+driver may simply not handle this sensor"*. The running count is shown on the
+live tally line instead, since one arrives every 10 s and the log is written
+once. `PRESENCE_SENSORS` keys *"this reader publishes `finger-present`"* by USB
+id, like `AREA_SENSORS`, so the gate works before the first touch; a reader in
+neither set keeps the old behaviour and its escape hatch.
+
+Two more things that same 40 s settled. A `verify-disconnected` at **25 s
+armed** turned out to be `PROTO` — the journal said so and the next arm worked
+1.1 s later — which is the one-string-three-errors rule happening on the first
+instance seen after the entry below, and the thermal check correctly declined
+it. And **three of the four real touches failed as `verify-no-match`** with
+minutiae extracted, so verify is now 7/7 failures and what remains is the
+**template**, not detection: the original report's two halves have come apart.
+
+`test-enroll.py` 200 → **246 assertions, all passing**; `test-battery.py`
+passing; widget construction re-smoked. No live configuration changed —
+`hyprlock.conf` untouched, password auth on, `pam_fprintd` still `sufficient`.
+`runbooks/fingerprint.md` §20u.
+
+**Later the same afternoon**, an enrolment attempt was reported as rejecting
+repeatedly. The journal says it was never an enrolment: every line reads
+`during verify`, so what rejected was the **calibration** — advice, not a gate,
+though the window gives no way to tell. Three things that session proved, all
+in §20u. **(a)** The calibrate-then-enrol flow **does not fit** the 180 s
+budget: calibration is a verify loop that only stops when the gate opens, so it
+spends the whole budget by design and the enrolment gets the remainder — §20l's
+successful 6/6 took 54 s and would not have fitted. For an enrolment attempt,
+**skip the calibration**. **(b)** libfprint's thermal estimate lives on the
+`FpDevice` in the **daemon**, not in the window — the trip landed 180.0 s after
+`fprintd` started — so a window's `armed Ns of 180s` is a **lower bound** and
+restarting `fprintd` (which `fp-debug.sh rebind` does) is the only way to zero
+it. **(c)** ⚠ Launched from Walker, the panel's attempt log is **lost**:
+`elephant` starts it via `systemd-run` and that output reaches no journal, so
+the tally that separates a template problem from a capture ceiling was
+unavailable — and the fprintd journal cannot stand in, since it is silent for
+`verify-no-match`. Run the panel from a terminal when diagnosing. Also
+recorded: **32 protocol errors in 83 s** against **zero** in the 6/6 run, still
+the sharpest discriminator available and still unexplained.
+
+---
+
+## 2026-11-03 — Fingerprint: the gap is a three-minute clock, not a finger
+
+Reported as gaps in capture and detection. Measured with a new no-finger
+instrument, `triton-panel/fp-debug.sh thermal`, and the cause is libfprint's
+**time-based thermal model**, which no earlier pass had met because every
+earlier session was shorter than three minutes.
+
+**Measured, nothing touching the pad:** one armed `VerifyStart` is cut off at
+**180.1 s** with `FP_DEVICE_ERROR_TOO_HOT` (`Device disabled to prevent
+overheating` in `journalctl -u fprintd`), every re-arm is then refused in
+**0.0 s**, and the reader is usable again between **180 s and 212 s** after the
+trip. The model is a duty-cycle estimate, not a thermometer
+(`DEFAULT_TEMP_HOT_SECONDS 3 * 60`, `DEFAULT_TEMP_COLD_SECONDS 9 * 60`), and
+**an armed verify counts as use even while it waits for a finger**. The same
+run exposed a second artefact: `verify-swipe-too-short` arrives every **10 s**
+on an empty pad — the `elan` command timeout (`ELAN_CMD_TIMEOUT 10000`), not a
+report about anyone's hand.
+
+**Why unlock fails.** hyprlock arms one verify at lock and leaves it armed, so
+three minutes in the model fires; fprintd maps `TOO_HOT`, `PROTO` and `REMOVED`
+onto the **same** `verify-disconnected` string, hyprlock reads that as a
+disconnect, never re-arms, and skips `releaseDevice()`. So **every lock
+returned to more than ~3 minutes after it started has no fingerprint**, before
+a hand is near the pad, while the prompt still invites a touch. hypridle locks
+at 300 s idle, which makes those exactly the locks that matter. Upstream
+hyprlock `main` behaves identically.
+
+**Triton Panel** was mis-reporting it: a cooldown counted as a dry driver fault
+and, four of them in, told the user to rebind the USB device. The lockout is now
+recognised by **reading the journal** for the real error name, with the armed
+budget and an instant refusal as fallbacks, kept out of
+`MAX_CAL_DRY` / `MAX_DRY_RESTARTS`, waited out with a countdown instead of
+re-armed into a spin, and the armed budget is on screen. `test-enroll.py`
+154 → **200 assertions, all passing**; widget construction re-smoke-tested.
+Nothing in the live configuration changed — `hyprlock.conf` is untouched.
+
+Full analysis, options and hazards: `runbooks/fingerprint.md` §20t.
+
+---
+
+## 2026-11-03 — An update procedure, and a verifier for the machine itself
+
+The repo could describe this machine but could not **check** it. Added
+`tests/check-live-system.sh` (read-only, no sudo, non-zero exit on a broken invariant) and
+`runbooks/updates.md`, which owns the upgrade procedure. Nothing was upgraded; the gate was
+built first, deliberately, because the pending transaction is 648 packages.
+
+**What the audit found.** Last full upgrade **2026-09-26** — five weeks and 648 repo updates.
+**12 `.pacnew`** files unmerged, the oldest from April 2026, four sitting on top of hand-edited
+lines (`/etc/pacman.conf`'s `[cachyos-*-v3]` repo sections, `/etc/pam.d/sudo`'s `pam_fprintd`
+line, `limine-snapper-sync.conf`'s `MAX_SNAPSHOT_ENTRIES=8`, `locale.gen`'s `en_US.UTF-8`).
+`paccache.timer` disabled with 15 GB / 7282 packages cached. `/etc/snap-pac.ini` at defaults,
+so a kernel snapshot competes with 50 ordinary transactions under `NUMBER_LIMIT` instead of
+using the separate `NUMBER_LIMIT_IMPORTANT` quota. The snapshot rollback path — `snap-pac`
+hooks plus an enabled `limine-snapper-sync` — is fully installed and **has never been booted**.
+
+**`DefaultTimeoutStopSec=15s` in `/etc/systemd/system.conf` has never been in effect.** Found
+by the first run of the new verifier, which failed on it. `cachyos-settings` ships
+`/usr/lib/systemd/system.conf.d/00-timeout.conf` with `10s`, and a drop-in — including a
+packaged one under `/usr/lib/` — overrides the main `system.conf`. The effective value is
+**10s**, confirmed with `systemd-analyze cat-config systemd/system.conf` and
+`systemctl show -p DefaultTimeoutStopUSec`. The Thunderbolt shutdown-hang fix of
+`runbooks/boot-suspend.md` §6 is therefore satisfied **more strictly than asked, by CachyOS,
+not by us** — a wrong conclusion with a correct outcome, which is the combination least likely
+to be noticed. Two consequences: `/etc/systemd/system.conf.pacnew` is safe to accept wholesale
+because the line it drops is inert, and any future timeout of this machine's own must go in
+`/etc/systemd/system.conf.d/`, the only tier that beats a packaged drop-in. The verifier now
+asserts the **effective** value (≤ 15 s) and prints which file supplies it.
+`runbooks/updates.md` §2c.
+
+**Hyprland is retiring `hyprlang` for a Lua config, and this machine is already in legacy
+mode.** 0.56.2 logs `[cfg] Lua config not found, using legacy config at …`; `lua` is a hard
+dependency, the binary links `liblua.so.5.5`, and `/usr/share/hypr/hyprland.lua` plus
+`stubs/hl.meta.lua` ship with the package. Deprecated upstream in 0.55; the removal release is
+**unconfirmed** and 0.57.0 is in the pending queue. The blocker is not the 485 lines of `.conf`
+across 13 files — it is **`hyprctl keyword`**, which the binary refuses under a non-legacy
+parser (*"keyword can't work with non-legacy parsers. Use eval."*), so `monitor-mode.sh`'s
+profile applies, `edp_mode()` and `apply_monitor_tf()` would all need porting to `hyprctl eval`.
+A `hyprland.lua` wins whenever present, so the migration is a reversible A/B that can and should
+be tested **before** 0.57.0 rather than discovered during it. Also established: `hl.on` exposes
+only `hyprland.start` and `hyprland.shutdown`, so `monitor-autoswitch.sh` cannot become Lua
+event handlers; emergency mode leaves `SUPER + Q` if a Lua config errors; and the auto-reload
+hazard survives (`[lua] file {} modified, reloading`). `runbooks/updates.md` §4.
+
+**Three stale references under `configs/` that no test could see.** `configs/hypr/env.conf`,
+`configs/modprobe.d/acer-wmi-battery.conf` and `configs/vlc/vlcrc` still pointed at sections
+§12, §14 and §13c of the snapshot doc dissolved on 2026-11-03.
+`tests/check-doc-refs.sh` had never looked at them — its file list stopped at `.md`, `.sh` and
+`.py` — although `CLAUDE.md` requires comments in `configs/` to be maintained like any other
+document. The checker now reads **every tracked text file**, with two concessions for non-document
+files: backticks are optional (a `.conf` comment should not have to use markdown punctuation) and
+either the file-relative or the repo-root path form resolves, because a mirrored config is
+installed at a live path where "relative to this file" means nothing. Documents stay strict —
+file-relative only — which is the exact breakage the restructure shipped. The three references
+were re-pointed; 0 errors across 308 references in 72 files. The deliberate narrowing kept: naming the
+dissolved file as *history* is legitimate, and only a `§N` **pointer** at it is an error.
+
+**What a snapshot rollback actually covers, verified rather than assumed.** snapper's `root`
+config snapshots the subvolume at `/` (`nvme0n1p2[/@]`); `/home`, `/root`, `/srv`, `/var/cache`,
+`/var/log` and `/var/tmp` are separate subvolumes and `/boot` is a vfat ESP, so none of them
+roll back. Two consequences worth knowing before relying on it: `/usr/lib/modules/` **is**
+inside the snapshot, so a rolled-back kernel keeps its modules; and `/home` is **not**, so a
+snapshot will not undo a bad edit to the live `~/.config/hypr` — the repo's `configs/` mirror
+and the snapshot cover different halves of the machine and neither substitutes for the other.
+`/var/cache` being outside is a feature: a rollback leaves the package cache, and with it the
+downgrade path and the `pacdiff -3` merge base, intact. `runbooks/updates.md` §6a.
+
+**Mirror parity is now checked.** The verifier carries the manifest of every live path this repo
+claims to own — 36 files — and classifies drift: effective-line drift fails, comment-only drift
+is a note, and `configs/vlc/vlcrc` (VLC rewrites it on exit) and `configs/hypr/hyprlock.conf`
+(Triton Panel writes the live copy) drift by design and never fail. First run: 34 in step, one
+comment-only drift (`configs/modprobe.d/acer-wmi-predator-v4.conf`, whose live copy is still the
+original Spanish — the `options` line is identical), none missing. This is the check that the
+logind drop-in needed, which sat committed and uninstalled from 2026-07-12 to 2026-10-12.
+
 ## 2026-11-03 — Three "pending" markers closed against the live system
 
 Immediately after the restructure, the todo list was read against the machine instead of

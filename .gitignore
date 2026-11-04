@@ -1,3 +1,8 @@
 # Python bytecode from triton-panel (the app is a single script; this is build output)
 __pycache__/
 *.pyc
+
+# Debug captures fp-debug.sh writes next to itself (presence-*, thermal-*).
+# Session artefacts: the runs that mattered are quoted in
+# runbooks/fingerprint.md, where they stay readable without a checkout.
+triton-panel/*.log

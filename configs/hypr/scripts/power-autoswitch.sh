@@ -24,9 +24,9 @@
 #             There is no manual UI for the refresh rate anywhere, so there is
 #             no user choice to override — and reconciling is what catches the
 #             three things that silently reset it: a `hyprctl reload` (which
-#             snaps eDP-1 back to monitors.conf's @240), a Super+M profile
-#             switch, and monitor-autoswitch.sh applying a profile on hotplug.
-#             The actual emit lives in `monitor-mode.sh edp-rate`, which no-ops
+#             snaps eDP-1 back to monitors.lua's @240) and anything else that
+#             re-emits the panel spec. (The profile system is parked.)
+#             The actual emit lives in `edp-rate.sh`, which no-ops
 #             unless the rate really differs.
 #
 #   PROFILE = changed only on a power-source TRANSITION.
@@ -57,7 +57,7 @@ set -uo pipefail   # no -e, like monitor-autoswitch.sh: a transient hyprctl
                    # failure in the first second after login must not kill the
                    # loop that runs for the rest of the session.
 
-MODE_SCRIPT="$HOME/.config/hypr/scripts/monitor-mode.sh"
+RATE_SCRIPT="$HOME/.config/hypr/scripts/edp-rate.sh"
 PREF="${XDG_CONFIG_HOME:-$HOME/.config}/triton-panel/power-auto"
 STATEFILE="${XDG_RUNTIME_DIR:-/tmp}/triton-power-mode"
 BATSTATUS=/sys/class/power_supply/BAT1/status
@@ -169,10 +169,10 @@ while :; do
   raw="$(read_source)"
 
   # The toggle moving 1 -> 0: restore the normal rate once and stand down. The
-  # restore works because monitor-mode.sh's own power_auto() now reads 0, so
+  # restore works because edp-rate.sh's own power_auto() now reads 0, so
   # edp_mode() resolves to @240 regardless of the power source.
   if [[ "$auto" == 0 && "$last_auto" == 1 ]]; then
-    "$MODE_SCRIPT" edp-rate 2>/dev/null || true
+    "$RATE_SCRIPT" 2>/dev/null || true
   fi
   # 0 -> 1: forget the last source so the block below treats this as a
   # transition and applies right now.
@@ -194,7 +194,7 @@ while :; do
       # RATE — every stable tick. edp-rate re-resolves from BAT1 itself and
       # no-ops when the rate already matches, so this is free when nothing
       # changed and self-healing when something reset it.
-      "$MODE_SCRIPT" edp-rate 2>/dev/null || true
+      "$RATE_SCRIPT" 2>/dev/null || true
 
       # PROFILE — transitions only.
       if [[ "$raw" != "$last_source" ]]; then

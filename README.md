@@ -31,7 +31,8 @@ cachyPool/
 │   └── gpu-video.md  monitors.md  power-battery.md  triton-panel.md
 ├── archive/                    ← install-era docs and applied-once remediation
 ├── triton-panel/               ← GTK4 hardware panel (source + 2 regression tests)
-├── tests/                      ← regression tests, incl. check-doc-refs.sh for the docs themselves
+├── tests/                      ← regression tests, incl. check-doc-refs.sh for the docs and
+│                                 check-live-system.sh for the machine itself
 └── configs/                    ← mirror of live dotfiles (hypr, waybar, kitty, …)
 ```
 

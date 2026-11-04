@@ -235,8 +235,47 @@ gated at all.
 ⚠ `MAX_CAL_DRY` does not cover any of this. It counts driver faults with **no**
 finger contact — a wedged endpoint. A resting finger is the opposite case.
 
+⚠ And a **thermal cooldown** is a third case that also faults with no contact,
+so it is excluded from `MAX_CAL_DRY` explicitly. libfprint cuts the reader off
+after `THERMAL_HOT_S = 180` seconds of being **armed** — waiting for a finger
+counts as use — and refuses everything for ~3.5 min more; fprintd reports it as
+`verify-disconnected`, the same string as a protocol error and a real unplug, so
+the panel **reads `journalctl -u fprintd` for the real error name** (unprivileged,
+~30 ms, and the only place it exists) and falls back to the session's cumulative
+armed time or a fault arriving in under a second only when the journal cannot
+tell. The log line names which of the three decided. ⚠ Two cooldowns that
+resume into an instant refusal stop being called thermal — that is where a
+wedged endpoint looks identical. It then **waits the cooldown out with a
+countdown rather than re-arming**, which is the one place the always-re-arm rule
+above must not apply: while the model is hot, every arm is refused instantly and
+re-arming on the result is a spin. Measured in `../runbooks/fingerprint.md` §20t;
+re-measure with `./fp-debug.sh thermal`, which needs no finger.
+
+⚠ And a **fourth** no-contact case, which is not a fault at all: the `elan`
+driver re-arms its own capture every `ELAN_CMD_TIMEOUT` (10 s) and needs
+`ELAN_MIN_FRAMES` (7) frames to call the result an image, so an **untouched**
+pad emits `*-swipe-too-short` every ten seconds. Those used to be counted as
+failed placements — ten of them fill the whole rolling window per 100 s of
+reading the screen, and the gate then announced *"Captures are too thin"* about
+a hand that was never there, while the enrol path's repeats counter reached
+*"the driver may simply not handle this sensor"*. `_looks_phantom()` discards
+them: a result in `PHANTOM_RESULTS` with no `finger-present` **ON edge** since
+the last accounted-for result stays out of the window, tally, attempt count and
+strip, in both phases, and the running count goes on the live tally line
+(`N reader timeouts ignored`) rather than in the log, which is written once.
+
+Unlike the thermal check this is **not** an inference — the reader reports
+whether anything touched it, and over the measured run the separation was total
+(4 real touches with presence, 2 phantoms without, 10.17 s and 10.03 s apart).
+`PRESENCE_SENSORS` keys *"this reader publishes `finger-present`"* by USB id,
+like `AREA_SENSORS`, so the gate works before the first touch —
+`strip.supported` only learns on the first touch, and the phantoms that matter
+land before it. A reader in neither set keeps the escape hatch above: counted,
+never silently discarded. `../runbooks/fingerprint.md` §20u.
+
 ⚠ Before changing anything here, run `./fp-debug.sh presence` and look at the
-signal. Two bugs in a row came from guessing at it.
+signal. Two bugs in a row came from guessing at it, and the third was fixed
+*because* it was finally run.
 
 ### Each stage must capture a DIFFERENT region
 
@@ -301,7 +340,8 @@ buckets each attempt:
 |---|---|---|
 | **scored** | `verify-match`, `verify-no-match` | an image was produced **and** minutiae extracted, so the matcher ran |
 | **rejected** | `verify-retry-scan`, `-too-short`, `-too-fast`, `-finger-not-centered`, `-remove-and-retry` | the capture never reached the matcher |
-| **driver** | `verify-disconnected`, `verify-unknown-error` | the device faulted; nothing to do with the hand |
+| **driver** | `verify-disconnected`, `verify-unknown-error` | the device faulted; nothing to do with the hand. ⚠ `verify-disconnected` is **three** libfprint errors behind one string — `TOO_HOT`, `PROTO`, `REMOVED` — and only `journalctl -u fprintd` says which (§20t) |
+| *(not a bucket)* | `verify-swipe-too-short` with no contact | ⚠ **not counted** — the driver's own 10 s capture timeout on an untouched pad, discarded by `_looks_phantom()` (§20u) |
 
 That split is the whole value. A **high scored rate with `no-match` every
 time** is evidence about the *stored template*, not your placement — the one

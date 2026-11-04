@@ -174,8 +174,11 @@ ENROLL_RESULTS = {
         "fatal", "Reader storage is full",
         "Delete prints from the reader before enrolling another."),
     "enroll-disconnected": (
-        "driver", "Reader disconnected",
-        "The device vanished mid-enrollment. Nothing here is your gesture."),
+        "driver", "Reader cut off",
+        "ONE string for THREE libfprint errors: TOO_HOT (the thermal lockout "
+        "at ~180s of armed time, §20t), PROTO and REMOVED. The device has "
+        "never actually left the USB bus here. Nothing in it is your "
+        "gesture; `journalctl -u fprintd` says which one it was."),
     "enroll-unknown-error": (
         "driver", "Driver fault",
         "fprintd hit a device or driver error, not a bad gesture. Check "
@@ -252,9 +255,12 @@ VERIFY_RESULTS = {
         "gesture", "Lift and retry", "rejected",
         "Take the finger right off the sensor, then go again."),
     "verify-disconnected": (
-        "driver", "Reader disconnected", "driver",
-        "fprintd reports this for a protocol error too -- on this machine the "
-        "sensor has never actually left the USB bus (§20m). Not your hand."),
+        "driver", "Reader cut off", "driver",
+        "ONE string for THREE libfprint errors: TOO_HOT (the thermal lockout, "
+        "§20t), PROTO and REMOVED. On this machine the sensor has never "
+        "actually left the USB bus (§20m), and after ~180s of being armed "
+        "the lockout is the likeliest of the three. Only "
+        "`journalctl -u fprintd` says which. Not your hand either way."),
     "verify-unknown-error": (
         "driver", "Driver fault", "driver",
         "A device or driver error, not a bad gesture. Check "
@@ -283,6 +289,15 @@ VERIFY_RESULTS = {
 # multi-frame motion assembly has nothing to stitch, and extraction ends in
 # "No minutiae found" -- which is exactly what this machine's journal shows.
 AREA_SENSORS = {"04f3:0c4f"}
+
+# Readers MEASURED to publish `finger-present` on this machine. Keyed by USB
+# id for the same reason AREA_SENSORS is -- it is a fact about the part, not
+# a property the driver volunteers (rule 1) -- and it is needed as a key
+# rather than learned on the fly because the panel has to know BEFORE the
+# first touch whether a silent pad means "nothing is there" or "this reader
+# never says". The phantoms that most need discarding are exactly the ones
+# that arrive while the user is still reading the screen (§20u).
+PRESENCE_SENSORS = {"04f3:0c4f"}
 
 ACER_PLATFORM = "/sys/devices/platform/acer-wmi"
 PLATFORM_PROFILE = "/sys/firmware/acpi/platform_profile"
@@ -401,6 +416,9 @@ def fprint_device():
         # AREA_SENSORS for why the two can disagree.
         "gesture": "press" if area else declared,
         "driver_scan_type_wrong": area and declared != "press",
+        # Whether a missing finger-present means "no finger". See
+        # PRESENCE_SENSORS and EnrollWindow.PHANTOM_RESULTS.
+        "reports_presence": usb_id in PRESENCE_SENSORS,
     }
 
 
@@ -529,16 +547,69 @@ def find_hwmon(name):
     return None
 
 
-def _log(message):
-    """Mirror the enrollment log to stderr with a timestamp.
+# The attempt log also goes to a FILE, always, whatever launched the panel.
+#
+# The stderr mirror below was written believing it would land in
+# `journalctl --user`. It does not. Walker is the normal way this panel is
+# started, and `elephant` runs it through `systemd-run`, whose transient unit
+# output reaches no journal at all -- measured 2026-11-03, when three separate
+# diagnoses in a row stalled on a missing attempt log. And fprintd's own
+# journal cannot substitute: it is SILENT for an accepted enrol stage and for
+# `verify-no-match`, so "nothing in the journal" means nothing whatsoever
+# (`runbooks/fingerprint.md` §20u, §20v). A session is reconstructible only if
+# the panel writes it down itself.
+#
+# Failures here are swallowed on purpose: a logging problem must never be able
+# to take the window down.
+LOG_DIR = pathlib.Path(
+    os.environ.get("TRITON_PANEL_LOG_DIR")
+    or os.path.join(os.environ.get("XDG_STATE_HOME")
+                    or os.path.expanduser("~/.local/state"), "triton-panel"))
+LOG_KEEP = 20          # newest kept; older ones pruned when a panel starts
+_log_file = None       # None = not tried, False = tried and failed
+_log_name = None
 
-    The panel is launched by the systemd --user manager, so this lands in
-    `journalctl --user`. Worth the two lines: the first enrollment failure on
-    this machine had to be reconstructed from fprintd's own journal because the
-    panel kept its reasoning on screen and nowhere else.
+
+def log_file_path():
+    """This process's log file, opening it on first use. None if unavailable."""
+    global _log_file, _log_name
+    if _log_file is not None:
+        return _log_name if _log_file else None
+    try:
+        LOG_DIR.mkdir(parents=True, exist_ok=True)
+        existing = sorted(LOG_DIR.glob("panel-*.log"))
+        for stale in existing[:-LOG_KEEP] if len(existing) > LOG_KEEP else []:
+            try:
+                stale.unlink()
+            except OSError:
+                pass
+        _log_name = LOG_DIR / f"panel-{time.strftime('%Y%m%d-%H%M%S')}.log"
+        # Line buffered, so a panel that is killed still has every line it
+        # printed -- which is the case this exists for.
+        _log_file = _log_name.open("a", encoding="utf-8", buffering=1)
+        _log_file.write(f"# triton-panel {time.strftime('%Y-%m-%d %H:%M:%S')} "
+                        f"pid {os.getpid()}\n")
+    except (OSError, ValueError):
+        _log_file, _log_name = False, None
+    return _log_name
+
+
+def _log(message):
+    """Mirror the enrollment log to stderr AND to a file, with a timestamp.
+
+    Worth the lines: the first enrollment failure on this machine had to be
+    reconstructed from fprintd's own journal because the panel kept its
+    reasoning on screen and nowhere else -- and on 2026-11-03 the same thing
+    happened three times over because stderr goes nowhere under Walker. See
+    LOG_DIR.
     """
-    print(f"[{time.strftime('%H:%M:%S')}] triton-panel/enroll: {message}",
-          file=sys.stderr, flush=True)
+    line = f"[{time.strftime('%H:%M:%S')}] triton-panel/enroll: {message}"
+    print(line, file=sys.stderr, flush=True)
+    if log_file_path() is not None:
+        try:
+            _log_file.write(line + "\n")
+        except (OSError, ValueError):
+            pass
 
 
 def reader_usb() -> tuple:
@@ -1829,6 +1900,25 @@ class EnrollWindow(Adw.Window):
     MAX_RESTARTS = 15
     MAX_DRY_RESTARTS = 3
 
+    # A ceiling on restarts that make NO PROGRESS, which MAX_DRY_RESTARTS does
+    # not cover: that one counts faults with no finger CONTACT -- a wedged
+    # endpoint. This is the opposite case and it is the one that actually
+    # blocks this machine. Measured 2026-11-03, §20w, from the panel's own log:
+    #
+    #   stage: Accepted -- stage 1 of 6, 1.29s of contact
+    #   driver: Reader cut off
+    #   info: Restarted enrollment (N) -- fprintd discarded 1 stage(s)
+    #
+    # ten times in 44 s, never once reaching stage 2. Contact is fine, the
+    # capture is ACCEPTED, and then a protocol error ends the operation before
+    # the next capture can arm -- so fprintd discards the partial enrolment
+    # (§20v read its enroll_cb: the print is written only on completion) and
+    # §20k's restart loop begins again at stage 1. Fifteen restarts of that is
+    # a counter resetting in front of the user for a minute; three is enough to
+    # name it. MAX_RESTARTS stays the backstop for the genuinely intermittent
+    # case, where stages DO accumulate.
+    MAX_STALLED_RESTARTS = 3
+
     # -- calibration gate ---------------------------------------------------- #
     #
     # Added 2026-11-01. Enrolment can pass 6/6 and still produce a template
@@ -1913,6 +2003,66 @@ class EnrollWindow(Adw.Window):
     #     can never suppress the measurement forever.
     SAME_PRESS_S = 2.0
 
+    # THE 10-SECOND PHANTOM. `elan` arms each capture with ELAN_CMD_TIMEOUT
+    # (10000 ms) and needs ELAN_MIN_FRAMES (7) frames to call the result an
+    # image, so an UNTOUCHED pad times out every 10 s and libfprint turns
+    # that into FP_DEVICE_RETRY_TOO_SHORT -> `*-swipe-too-short`. Nothing
+    # went near the reader, yet this window used to answer "Contact too
+    # short. Stay on the sensor longer" and file it as a failed placement:
+    # ten of them -- a full CAL_WINDOW -- per 100 s of reading the screen,
+    # ending in "Captures are too thin" about a hand that was never there.
+    #
+    # Measured 2026-11-03, ./fp-debug.sh presence (§20u). The separation was
+    # total across four real touches and two phantoms:
+    #
+    #   real     finger-present true -> false -> result      (4 of 4)
+    #   phantom  no finger-present at all, +10.17s / +10.03s  (2 of 2)
+    #
+    # and the journal is an independent second witness: a real short capture
+    # logs `Failed to detect minutiae`, a phantom logs nothing at all.
+    #
+    # So the discriminator is the reader's own report, not a timing guess.
+    # What this trades away: §20j's wall-clock escape hatch no longer
+    # applies to THESE TWO results on a reader known to report presence.
+    # Cost if that is ever wrong -- a genuine sub-7-frame tap that emitted
+    # no presence goes uncounted, one lost reject out of a rolling ten.
+    # Cost of the behaviour it replaces -- measured above.
+    PHANTOM_RESULTS = frozenset({"verify-swipe-too-short",
+                                 "enroll-swipe-too-short"})
+
+    # libfprint's TEMPERATURE MODEL, measured on this machine 2026-11-03 with
+    # ./fp-debug.sh thermal and nothing anywhere near the pad (§20t). It is a
+    # duty-cycle estimate, NOT a thermometer: the ratio rises toward 1 with a
+    # time constant of temp_hot_seconds while the device is in an operation,
+    # and AN ARMED VERIFY IS AN OPERATION -- so waiting for a finger burns the
+    # budget just as fast as using the reader. At the HOT threshold libfprint
+    # cancels the operation with FP_DEVICE_ERROR_TOO_HOT and refuses every new
+    # one until the ratio decays past 0.5.
+    #
+    # Measured: trip at 180.1 s of armed idle verify (upstream default is
+    # 3 * 60), then every re-arm refused in 0.0 s, usable again between 180 s
+    # and 212 s after the trip. The model predicts 540 * ln(0.731/0.5) = 205 s.
+    #
+    # Why the panel has to care: fprintd collapses TOO_HOT, PROTO and REMOVED
+    # into the SAME `verify-disconnected` string, so without this the lockout
+    # is indistinguishable from a wedged endpoint -- and the window told the
+    # user to go and rebind the USB device for what is a cooldown.
+    THERMAL_HOT_S = 180.0
+    THERMAL_WARN_S = 150.0     # say it before it happens, once
+    THERMAL_COOL_S = 215.0     # past the measured upper bound, not at it
+    THERMAL_INSTANT_S = 1.0    # a terminal fault this soon after an arm is a
+                               # refusal, not a capture: nothing was read
+    # After a cooldown the device resumes WARM (ratio 0.5), not cold, so the
+    # NEXT trip is 180 * ln(0.5/0.269) = 111 s away rather than a fresh 180.
+    # Resuming the estimate at zero is how the second trip of a session goes
+    # unrecognised and gets charged to the hand.
+    THERMAL_WARM_AGAIN_S = 111.0
+    # If a cooldown resumes straight back into an instant refusal twice in a
+    # row, "thermal" has stopped explaining it -- say so instead of waiting
+    # forever, because a genuinely wedged endpoint looks exactly like this.
+    MAX_THERMAL_CYCLES = 2
+    THERMAL_RESUME_GRACE_S = 10.0
+
     def __init__(self, parent, finger, label):
         super().__init__(
             transient_for=parent,
@@ -1941,6 +2091,9 @@ class EnrollWindow(Adw.Window):
         self._dry_restarts = 0
         self._contact_since_restart = False
         self._restart_block = None
+        # The furthest this window has EVER got, across restarts. `passed`
+        # cannot answer that: a restart resets it to 0 by necessity.
+        self._best_passed = 0
 
         # -- calibration state ---------------------------------------------- #
         # phase is what the claim is currently being used for, and what _stop
@@ -1958,6 +2111,27 @@ class EnrollWindow(Adw.Window):
         # start, so the first touch of a run counts.
         self._lifted = True
         self._presence_changes = 0
+        # Has the reader reported the finger DOWN since the last result it
+        # accounted for? The ON edge is the whole of what separates a
+        # placement from the driver idling. See PHANTOM_RESULTS.
+        self._press_seen = False
+        self._phantom_noted = False
+        self._phantoms = 0
+
+        # -- thermal budget state (§20t) ------------------------------------ #
+        # _armed_total + the open interval is how long THIS session has held
+        # the device in an operation, which is what libfprint's model counts.
+        self._armed_total = 0.0
+        self._armed_since = None
+        self._armed_wall = None
+        self._thermal_hits = 0
+        self._thermal_until = None   # monotonic deadline while cooling
+        self._thermal_id = None      # the resume timer
+        self._thermal_warned = False
+        self._thermal_shown = None
+        self._thermal_resumed_at = None
+        self._thermal_futile = 0
+        self._thermal_evidence = None
         self._last_counted_at = 0.0
         self._cal_noted_no_lift = False
         self._cal_suppressed = 0
@@ -1975,12 +2149,40 @@ class EnrollWindow(Adw.Window):
         # it afterwards.
         self.slot_taken = finger in (getattr(parent, "_fp_fingers", None) or [])
 
+        # Is there ANY print to calibrate against? Calibration is a verify
+        # loop -- it scores the finger against a stored template -- so with
+        # nothing enrolled fprintd refuses the VerifyStart outright
+        # (`NoEnrolledPrints`) and there is nothing a measurement could even
+        # mean. §20v: on 2026-11-03 the window offered Calibrate as the
+        # SUGGESTED action with zero prints and the user hit that refusal five
+        # times, being told each time that the reader might be wedged.
+        self.has_print = bool(getattr(parent, "_fp_fingers", None))
+
         # Set the moment the window starts going away, so the async Claim
         # callback can tell it is arriving into a dead window.
         self._closed = False
 
+        # Is a claim actually held RIGHT NOW? `_released` was doing this job
+        # and could not: it starts False meaning "nothing released yet", which
+        # conflates "we hold a claim" with "we never claimed one". So opening
+        # the Enroll window and closing it without pressing anything ran
+        # _stop(release=True) and fired EnrollStop + Release at a device
+        # nobody had claimed -- fprintd answering
+        # `Device was not claimed before use` TWICE, which §20r named the most
+        # misleading line this subsystem can print because it reads exactly
+        # like a claim leak and is the opposite of one. Seen for real at
+        # 17:42:35 on 2026-11-03. §20v.
+        self._claimed = False
+
         self.usb_id, self.usb_power = reader_usb()
         self._build()
+        # Say where the log is being written, IN the window. The stderr mirror
+        # is lost whenever Walker started the panel, and a log nobody can find
+        # is the same as no log -- which is what stalled §20v's diagnosis.
+        path = log_file_path()
+        self._add_log("info", "Writing this log to",
+                      str(path) if path else
+                      "nowhere -- the log directory could not be opened")
         self.connect("close-request", self._on_close_request)
 
     # -- construction ------------------------------------------------------- #
@@ -2121,14 +2323,31 @@ class EnrollWindow(Adw.Window):
         )
         box.append(self.cal_note)
 
+        if not self.has_print:
+            none = Gtk.Label(xalign=0.0, wrap=True)
+            none.add_css_class("warning")
+            none.set_text(
+                "\u26a0 There is no print enrolled, so there is nothing to "
+                "calibrate against -- fprintd refuses the verify with "
+                "NoEnrolledPrints. Enroll first; you can calibrate afterwards "
+                "to measure how well that print actually reads."
+            )
+            box.append(none)
+
         if self.slot_taken:
             warn = Gtk.Label(xalign=0.0, wrap=True)
             warn.add_css_class("warning")
             warn.set_text(
-                f"\u26a0 {self.label} already holds a print. Enrolling into "
-                "this slot OVERWRITES it. To keep it, close this window and "
-                "pick a finger with no print -- the slot name is only a "
-                "label, so a free slot can hold the same physical finger."
+                f"\u26a0 {self.label} already holds a print, and starting an "
+                "enrolment here DELETES IT IMMEDIATELY -- not at the end, at "
+                "the start, before the first stage. fprintd's enroll_start "
+                "loads the existing print and calls delete_enrolled_fingers "
+                "on it, and the new one is only written if the enrolment "
+                "COMPLETES. So an enrolment you abandon, or that fails, "
+                "leaves this slot EMPTY. Measured: that is how the print of "
+                "2026-11-01 was lost. To keep it, close this window and pick "
+                "a finger with no print -- the slot name is only a label, so "
+                "a free slot can hold the same physical finger."
             )
             box.append(warn)
 
@@ -2138,13 +2357,30 @@ class EnrollWindow(Adw.Window):
         return box
 
     def _update_cal_tally(self):
+        # The armed budget belongs next to the tally, because it is the other
+        # thing that decides whether these numbers mean anything: past
+        # THERMAL_HOT_S the reader stops answering and every later attempt is
+        # a refusal rather than a measurement (§20t). It is shown from the
+        # first second, before any result exists, because it is already
+        # burning -- an armed verify is an operation even while it waits.
+        budget = (f"armed {int(self._armed_seconds())}s of "
+                  f"{int(self.THERMAL_HOT_S)}s before libfprint cuts the "
+                  f"reader off")
+        if self._phantoms:
+            # Shown here rather than in the log, which is written once:
+            # these keep arriving every 10 s and the number is the
+            # honest answer to "why has nothing appeared?" -- the
+            # reader is idling, not failing (§20u).
+            budget += (f" · {self._phantoms} reader timeout"
+                       f"{'s' if self._phantoms != 1 else ''} ignored")
         if not self.cal_tally:
-            self.cal_tally_label.set_text("")
+            self.cal_tally_label.set_text(budget if self.running else "")
             return
         parts = [f"{count}x {name}" for name, count in
                  sorted(self.cal_tally.items(), key=lambda kv: -kv[1])]
         self.cal_tally_label.set_text(
-            f"{self.cal_attempts} attempts · " + " · ".join(parts))
+            f"{self.cal_attempts} attempts · " + " · ".join(parts)
+            + " · " + budget)
 
     def _cal_gate(self):
         """(ready, scored_recent, window_size). Rolling, not cumulative."""
@@ -2218,6 +2454,15 @@ class EnrollWindow(Adw.Window):
         start = getattr(self, "start_button", None)
         cal = getattr(self, "cal_button", None)
         if self.phase == "idle" and start is not None and cal is not None:
+            if not self.has_print:
+                # Nothing to measure against. Enrolling is not merely the
+                # better option here, it is the only one that can run.
+                cal.set_sensitive(False)
+                cal.remove_css_class("suggested-action")
+                start.set_label("Enroll")
+                start.add_css_class("suggested-action")
+                return
+            cal.set_sensitive(True)
             start.set_label("Enroll now" if ready else "Enroll anyway")
             if ready:
                 start.add_css_class("suggested-action")
@@ -2432,8 +2677,21 @@ class EnrollWindow(Adw.Window):
         _log(f"{kind}: {title}{(' — ' + detail) if detail else ''}")
 
     def _update_tally(self):
+        # The armed budget rides along here too, not only in calibration: an
+        # enrolment holds the device armed from the first stage to the last,
+        # so it is the phase the 180 s ceiling actually cuts short (§20t).
+        budget = (f"armed {int(self._armed_seconds())}s of "
+                  f"{int(self.THERMAL_HOT_S)}s before libfprint cuts the "
+                  f"reader off")
+        if self._phantoms:
+            # Shown here rather than in the log, which is written once:
+            # these keep arriving every 10 s and the number is the
+            # honest answer to "why has nothing appeared?" -- the
+            # reader is idling, not failing (§20u).
+            budget += (f" · {self._phantoms} reader timeout"
+                       f"{'s' if self._phantoms != 1 else ''} ignored")
         if not self.tally:
-            self.tally_label.set_text("")
+            self.tally_label.set_text(budget if self.running else "")
             return
         parts = [f"{count}x {name}" for name, count in
                  sorted(self.tally.items(), key=lambda kv: -kv[1])]
@@ -2441,7 +2699,8 @@ class EnrollWindow(Adw.Window):
         if self.restarts:
             prefix += (f" · {self.restarts} restart"
                        f"{'s' if self.restarts != 1 else ''}")
-        self.tally_label.set_text(prefix + " · " + " · ".join(parts))
+        self.tally_label.set_text(prefix + " · " + " · ".join(parts)
+                                  + " · " + budget)
 
     # -- the enrollment ----------------------------------------------------- #
 
@@ -2522,6 +2781,7 @@ class EnrollWindow(Adw.Window):
                                       5000, None)
             except GLib.Error:
                 pass
+            self._claimed = False
             _log("claim granted after the window closed -- released")
             return
 
@@ -2536,6 +2796,7 @@ class EnrollWindow(Adw.Window):
         self._saw_contact = False
 
         self._released = False
+        self._claimed = True
         self._props_handler = self.device.connect(
             "g-properties-changed", self._on_properties_changed)
         self._signal_handler = self.device.connect("g-signal", self._on_signal)
@@ -2555,13 +2816,20 @@ class EnrollWindow(Adw.Window):
         self._set_stages_note()
 
     def _begin_enroll(self):
+        # The armed budget carries over from calibration on purpose; see
+        # _begin_calibrate.
+        self._thermal_warned = False
         self.passed = 0
         self.attempts = 0
         self.tally.clear()
         self.restarts = 0
         self._dry_restarts = 0
         self._contact_since_restart = False
+        self._press_seen = False
+        self._phantom_noted = False
+        self._phantoms = 0
         self._restart_block = None
+        self._best_passed = 0
 
         try:
             self.device.call_sync("EnrollStart", GLib.Variant("(s)", (self.finger,)),
@@ -2574,6 +2842,7 @@ class EnrollWindow(Adw.Window):
             self._idle_buttons()
             return
 
+        self._arm_started()
         self.phase = "enroll"
         self.running = True
         self.stop_button.set_sensitive(True)
@@ -2599,6 +2868,12 @@ class EnrollWindow(Adw.Window):
         self._tick_id = GLib.timeout_add(self.TICK_MS, self._tick)
 
     def _begin_calibrate(self):
+        # /!\\ The armed budget is NOT reset here. libfprint's model does not
+        # reset per phase -- it decays with a 540 s constant -- so a 100 s
+        # calibration followed by "Enroll anyway" trips 65 s into the
+        # enrolment, and a budget zeroed at the phase boundary would read that
+        # as a driver fault and send the user to rebind a USB device.
+        self._thermal_warned = False
         self.cal_log.clear()
         self.cal_tally.clear()
         self.cal_attempts = 0
@@ -2607,6 +2882,9 @@ class EnrollWindow(Adw.Window):
         self._cal_contact = False
         self._lifted = True
         self._presence_changes = 0
+        self._press_seen = False
+        self._phantom_noted = False
+        self._phantoms = 0
         self._last_counted_at = 0.0
         self._cal_noted_no_lift = False
         self._cal_suppressed = 0
@@ -2647,6 +2925,7 @@ class EnrollWindow(Adw.Window):
         about it. VerifyFingerSelected names whichever one fprintd picked.
         """
         if not first:
+            self._arm_stopped()
             try:
                 self.device.call_sync("VerifyStop", None, Gio.DBusCallFlags.NONE,
                                       10000, None)
@@ -2658,14 +2937,29 @@ class EnrollWindow(Adw.Window):
                                   Gio.DBusCallFlags.NONE, 10000, None)
         except GLib.Error as error:
             self._add_log("driver", "VerifyStart failed", error.message or "")
-            self.status_label.set_text("Calibration did not start")
-            self.hint_label.set_text(
-                f"{error.message or ''} If this keeps happening the reader may "
-                "be wedged — close this window and run "
-                "./fp-debug.sh rebind.")
+            if "NoEnrolledPrints" in (error.message or ""):
+                # NOT a driver problem, and the rebind advice below would be
+                # the §20g mistake all over again: sending someone to reset a
+                # USB endpoint over a refusal that is purely about empty
+                # storage. §20v.
+                self.status_label.set_text("Nothing to calibrate against")
+                self.hint_label.set_text(
+                    "Calibration scores your finger against a print that is "
+                    "already stored, and there is none enrolled — fprintd "
+                    "refuses the verify before the reader is touched. This is "
+                    "not a reader fault and a rebind would do nothing. Press "
+                    "Enroll instead; calibrating is worth doing afterwards, "
+                    "to measure how well the new print reads.")
+            else:
+                self.status_label.set_text("Calibration did not start")
+                self.hint_label.set_text(
+                    f"{error.message or ''} If this keeps happening the reader "
+                    "may be wedged — close this window and run "
+                    "./fp-debug.sh rebind.")
             self._stop(release=True)
             self._idle_buttons()
             return False
+        self._arm_started()
         return True
 
     def _tick(self):
@@ -2673,6 +2967,26 @@ class EnrollWindow(Adw.Window):
             self._tick_id = None
             return False
         self.strip.queue_draw()
+        # The thermal clock, at one update per second rather than per frame.
+        left = int(self._thermal_remaining())
+        if self._thermal_until is not None:
+            if left != self._thermal_shown:
+                self._thermal_shown = left
+                self.status_label.set_text(
+                    f"Thermal lockout — the reader answers again in {left}s")
+        elif not self._thermal_warned and self._armed_seconds() >= self.THERMAL_WARN_S:
+            # Said once, before it happens, because after it happens every
+            # touch is refused and the window would otherwise look broken.
+            self._thermal_warned = True
+            self._add_log("info", "Thermal budget nearly spent",
+                          f"{int(self._armed_seconds())}s armed of "
+                          f"{int(self.THERMAL_HOT_S)}s")
+            self.hint_label.set_text(
+                f"Heads up: libfprint cuts the sensor off after "
+                f"{int(self.THERMAL_HOT_S)}s of being armed, and this session "
+                f"is nearly there. If it stops answering, that is the clock, "
+                f"not your hand — wait about "
+                f"{int(self.THERMAL_COOL_S)}s. §20t.")
         return True
 
     def _on_properties_changed(self, _proxy, changed, _invalidated):
@@ -2686,6 +3000,9 @@ class EnrollWindow(Adw.Window):
                 # and MAX_CAL_DRY.
                 self._contact_since_restart = True
                 self._cal_contact = True
+                # THE ON EDGE. Everything that tells a placement apart
+                # from the driver's own 10 s timeout hangs off this line.
+                self._press_seen = True
             else:
                 # THE LIFT. Hooked on the real finger-present transition --
                 # deliberately NOT on close_open_contact(), which the result
@@ -2750,15 +3067,63 @@ class EnrollWindow(Adw.Window):
         # nothing at all.
         gated = self.strip.supported is True
         now = time.monotonic()
+        # How long the device had been armed when this result landed. A
+        # terminal fault in under a second did not read anything -- that is a
+        # refusal, which is what a hot device does to every arm (§20t).
+        dt_since_arm = (now - self._armed_since
+                        if self._armed_since is not None else None)
+
+        if self._looks_phantom(result):
+            # Nothing touched the pad, so this is not a measurement: it
+            # stays out of the window, the tally, the strip and the attempt
+            # count, and it does not move the hint -- answering "stay on
+            # the sensor longer" to an untouched reader is how a run came
+            # to report thin captures from a hand that was never there.
+            # It arrives done = False, so fprintd's verify is still armed
+            # and there is nothing to restart. §20u.
+            self._note_phantom(title)
+            self._update_cal_tally()
+            # Measured, every phantom arrives done = False, so the verify is
+            # still open and there is nothing to restart. Guarded anyway, the
+            # same way the same-press branch below is: swallowing a TERMINAL
+            # result without re-arming is what left this window deaf in §20r,
+            # and a suppression branch is exactly where that gets reintroduced.
+            if done and self.running and self.phase == "calibrate":
+                self._verify_cycle()
+            return
+
         quiet = (now - self._last_counted_at) < self.SAME_PRESS_S
         unmoved = gated and not self._lifted and self._presence_changes == 0
 
-        if unmoved and quiet:
+        # Is this result ABOUT a placement? Both gates below exist to stop one
+        # contact being counted twice, which is a statement about a press, so
+        # neither has any business holding a `driver` result.
+        #
+        # Measured 2026-11-03 (§20v), from a real session's log: across 32 s,
+        # EVERY suppression was a `verify-disconnected` -- the gate caught no
+        # actual repeat press at all, it ate driver faults. Three consequences,
+        # the third of which is the reason this is a defect and not a cosmetic
+        # problem: the user was told to "take the finger right off the pad"
+        # about a reader that had stopped reading; `_cal_dry` never incremented
+        # so `MAX_CAL_DRY` could not fire; and the THERMAL check never ran,
+        # because it lives in the terminal `bucket == "driver"` branch BELOW
+        # this return -- so a §20t lockout with a finger resting on the pad
+        # would have spun here for ever, saying "lift the finger clear" for
+        # the whole 215 s cooldown and never entering it.
+        placement = bucket != "driver"
+
+        if placement and unmoved and quiet:
             # One unbroken press cannot produce more than one measurement, and
             # counting it again is how the rolling window filled with ten
             # rejects from a single contact (§20r). Note what this branch does
             # NOT do: it does not skip the re-arm below. §20s.
             self._cal_suppressed += 1
+            # Already False whenever this branch runs -- `unmoved` requires
+            # _presence_changes == 0 and the ON edge sets both together --
+            # so this is a guard against that coupling changing, not a fix.
+            # Kept because the invariant it protects is "a press is spent once
+            # it has been accounted for", and this branch does account for one.
+            self._press_seen = False
             if not self._cal_noted_no_lift:
                 self._cal_noted_no_lift = True
                 self._add_log("info", "Same contact \u2014 not counted",
@@ -2773,7 +3138,7 @@ class EnrollWindow(Adw.Window):
                 self._verify_cycle()
             return
 
-        if unmoved:
+        if placement and unmoved:
             # The escape hatch. finger-present reported nothing for longer than
             # one press can plausibly last, so this is counted rather than
             # suppressed forever -- and said out loud, because "the driver
@@ -2784,9 +3149,15 @@ class EnrollWindow(Adw.Window):
 
         duration = self.strip.close_open_contact()
         self.strip.mark(kind, duration)
-        self._lifted = False
-        self._presence_changes = 0
-        self._last_counted_at = now
+        if placement:
+            # A driver fault measured no press, so it must not SPEND the
+            # evidence that one happened -- otherwise the next real result
+            # arriving inside SAME_PRESS_S is suppressed as a repeat of a
+            # press that was never counted. §20v.
+            self._lifted = False
+            self._presence_changes = 0
+            self._press_seen = False
+            self._last_counted_at = now
 
         self.cal_attempts += 1
         self.cal_tally[title] = self.cal_tally.get(title, 0) + 1
@@ -2822,6 +3193,14 @@ class EnrollWindow(Adw.Window):
             return
 
         if bucket == "driver":
+            # The lockout first (§20t). It arrives as `verify-disconnected`,
+            # the same string as a protocol error, and counting it as a dry
+            # driver fault is how this window came to tell the user to rebind
+            # a USB device that was merely cooling down.
+            if self._looks_thermal(dt_since_arm):
+                self._cal_contact = False
+                self._enter_thermal(title)
+                return
             self._cal_dry = 0 if self._cal_contact else self._cal_dry + 1
             self._cal_contact = False
             if self._cal_dry >= self.MAX_CAL_DRY:
@@ -2841,6 +3220,218 @@ class EnrollWindow(Adw.Window):
         # the user might touch it; whether the result gets COUNTED is decided
         # above and has nothing to do with arming. §20s.
         self._verify_cycle()
+
+    # -- the thermal budget (§20t) ------------------------------------------ #
+    #
+    # libfprint counts the time the device spends IN AN OPERATION, and an
+    # armed verify is an operation even while it waits for a finger. So this
+    # window burns the budget by being open and listening, which is exactly
+    # what it was designed to do, and at 180 s the reader is cut off.
+
+    def _arm_started(self):
+        if self._armed_since is None:
+            self._armed_since = time.monotonic()
+        # Wall clock too: journalctl --since needs a date, and time.monotonic()
+        # is not one. (It also does not advance across s2idle, which is why
+        # the budget itself stays on monotonic.)
+        self._armed_wall = time.time()
+
+    def _arm_stopped(self):
+        if self._armed_since is not None:
+            self._armed_total += time.monotonic() - self._armed_since
+            self._armed_since = None
+
+    def _armed_seconds(self):
+        """How long this session has held the device armed, open interval included."""
+        open_for = (time.monotonic() - self._armed_since
+                    if self._armed_since is not None else 0.0)
+        return self._armed_total + open_for
+
+    def _journal_too_hot(self):
+        """True / False / None — what fprintd actually logged, if readable.
+
+        This is the rule the rest of this file only infers: fprintd collapses
+        FP_DEVICE_ERROR_TOO_HOT, _PROTO and _REMOVED into one D-Bus string and
+        publishes no temperature property, so the journal is the ONLY place the
+        real error name exists (§20t). Reading it needs no privileges on this
+        machine and takes ~30 ms.
+
+        None means "could not tell" — unreadable, or a line that is neither —
+        and the caller falls back to the budget inference rather than guessing.
+        Only lines since this arm are considered, or a stale trip from earlier
+        in the session would answer for a fresh fault.
+        """
+        since = time.strftime("%Y-%m-%d %H:%M:%S",
+                              time.localtime((self._armed_wall
+                                              or time.time()) - 2))
+        try:
+            out = subprocess.run(
+                ["journalctl", "-u", "fprintd", "-n", "5", "-o", "cat",
+                 "--no-pager", "--since", since],
+                capture_output=True, text=True, timeout=3).stdout or ""
+        except (OSError, subprocess.SubprocessError):
+            return None
+        if "prevent overheating" in out:
+            return True
+        if "protocol error" in out or "device was removed" in out.lower():
+            return False
+        return None
+
+    def _presence_known(self):
+        """Can a silent pad be read as "no finger" on this reader?
+
+        Two sources, both about the hardware rather than about timing: the
+        USB id (PRESENCE_SENSORS, measured) and the fact that this session
+        has already seen the property arrive at least once. The id is what
+        makes the gate work from the first second -- the strip only learns
+        on the first touch, and the phantoms that need discarding are the
+        ones that land before it.
+        """
+        return (self.strip.supported is True
+                or bool(self.info.get("reports_presence")))
+
+    def _looks_phantom(self, result):
+        """Did the driver's 10 s capture timeout produce this, not a finger?
+
+        Unlike _looks_thermal this is NOT an inference. The reader itself
+        reports whether anything touched it, and over the measured run the
+        separation was total. PHANTOM_RESULTS holds the numbers and names
+        what the rule trades away.
+        """
+        return (result in self.PHANTOM_RESULTS
+                and self._presence_known()
+                and not self._press_seen)
+
+    def _note_phantom(self, title):
+        """Log the phantoms once per run, then keep quiet.
+
+        Quiet is the point: one lands every 10 s for as long as the window
+        is open, so a line per event would bury the real results and a
+        status repaint would stomp the instruction being read. The running
+        count goes on the tally line instead, which is already live.
+        """
+        self._phantoms += 1
+        if not self._phantom_noted:
+            self._phantom_noted = True
+            self._add_log(
+                "info", "Reader timeout \u2014 not counted",
+                f"{title} with no finger reported. The driver re-arms its "
+                f"capture every 10s and calls an empty one too short. It "
+                f"is the reader idling, not a placement, so it does not "
+                f"score. §20u")
+
+    def _looks_thermal(self, dt_since_arm):
+        """Is this *-disconnected libfprint's lockout rather than a fault?
+
+        /!\\ AN INFERENCE, and it has to be one. fprintd's
+        verify_result_to_name() maps FP_DEVICE_ERROR_TOO_HOT, _PROTO and
+        _REMOVED onto the SAME D-Bus string, and 1.94.5 publishes no
+        temperature property, so the only place the real error name exists is
+        `journalctl -u fprintd`. Two signals point at the clock rather than at
+        the driver:
+
+          * this session has held the device armed for about as long as
+            libfprint's budget -- measured, the trip lands at 180.1 s;
+          * or a fault came back faster than any capture could run, which is
+            what a refusal looks like: once hot, every re-arm fails in 0.0 s.
+
+        Everything built on this says "looks like" and names the journal, so a
+        wrong guess costs a sentence instead of a wrong instruction -- which
+        is the whole lesson of §20g.
+        """
+        verdict = self._journal_too_hot()
+        if verdict is not None:
+            self._thermal_evidence = "journal"
+            return verdict
+        if self._armed_seconds() >= self.THERMAL_WARN_S:
+            self._thermal_evidence = "armed budget"
+            return True
+        if (self._thermal_hits > 0
+                and dt_since_arm is not None
+                and dt_since_arm < self.THERMAL_INSTANT_S):
+            self._thermal_evidence = "instant refusal"
+            return True
+        self._thermal_evidence = None
+        return False
+
+    def _thermal_remaining(self):
+        if self._thermal_until is None:
+            return 0.0
+        return max(0.0, self._thermal_until - time.monotonic())
+
+    def _enter_thermal(self, title):
+        """Stop re-arming, wait the cooldown out, and say what is happening.
+
+        This is the ONE place §20s's "always re-arm immediately" must not
+        apply. While the model is hot every VerifyStart faults instantly, so
+        re-arming on the result is a spin loop: it measures nothing, it fills
+        the log, and it keeps the claim. The cost of not re-arming is a missed
+        touch -- §20s's own lesson -- which is why the wait is shown with a
+        countdown rather than going quiet.
+        """
+        now = time.monotonic()
+        self._thermal_hits += 1
+        evidence = self._thermal_evidence or "armed budget"
+
+        # A cooldown that resumes straight back into an instant refusal twice
+        # in a row is not being explained by the clock any more, and a wedged
+        # endpoint looks exactly like this. Say so rather than waiting again.
+        if (self._thermal_resumed_at is not None
+                and now - self._thermal_resumed_at < self.THERMAL_RESUME_GRACE_S
+                and evidence != "journal"):
+            self._thermal_futile += 1
+        else:
+            self._thermal_futile = 0
+        if self._thermal_futile >= self.MAX_THERMAL_CYCLES:
+            self.status_label.set_text("Treated as thermal twice; it still refuses")
+            self.hint_label.set_text(
+                "Two cooldowns in a row ended in an immediate refusal, so the "
+                "clock has stopped explaining this. Read "
+                "`journalctl -u fprintd | tail -5`: if the line is NOT 'Device "
+                "disabled to prevent overheating', this is a different fault "
+                "and ./fp-debug.sh rebind is the next step. §20t.")
+            self._add_log("driver", "Stopped: not thermal after all",
+                          f"{self._thermal_futile} cooldowns resumed into an "
+                          "instant refusal")
+            self._stop(release=True)
+            self._idle_buttons()
+            return
+
+        self._thermal_until = now + self.THERMAL_COOL_S
+        # The model resumes WARM, not cold: the next trip is
+        # THERMAL_HOT_S - THERMAL_WARM_AGAIN_S away, so the estimate restarts
+        # there rather than at zero.
+        self._armed_total = max(0.0, self.THERMAL_HOT_S - self.THERMAL_WARM_AGAIN_S)
+        self._armed_since = None
+        self._thermal_warned = False
+        wait = int(self.THERMAL_COOL_S)
+        self.status_label.set_text("The reader is in libfprint's thermal lockout")
+        self.hint_label.set_text(
+            f"Not your finger, and not a broken reader. libfprint cuts the "
+            f"sensor off after {int(self.THERMAL_HOT_S)}s of being ARMED — "
+            f"waiting for a touch counts as use — and then refuses everything "
+            f"for about {wait}s. No way of moving your hand changes it. "
+            f"Confirm it: `journalctl -u fprintd | tail -3` says 'Device "
+            f"disabled to prevent overheating'. See §20t.")
+        self._add_log("driver", "Thermal lockout",
+                      f"{title}; evidence: {evidence}. Waiting {wait}s. "
+                      "NOT a wedged endpoint — do not rebind.")
+        if self._thermal_id is not None:
+            GLib.source_remove(self._thermal_id)
+        self._thermal_id = GLib.timeout_add_seconds(wait, self._thermal_resume)
+
+    def _thermal_resume(self):
+        self._thermal_id = None
+        self._thermal_until = None
+        self._thermal_resumed_at = time.monotonic()
+        if not self.running or self.phase != "calibrate":
+            return False
+        self._add_log("info", "Cooled down", "re-arming the verify")
+        self.status_label.set_text("Calibrating — not enrolling")
+        self.hint_label.set_text(
+            "The reader should answer again now. Put the finger on the pad.")
+        self._verify_cycle()
+        return False
 
     def _region_for(self, index):
         """The region for the 0-based stage `index`, or None past the end.
@@ -2901,6 +3492,26 @@ class EnrollWindow(Adw.Window):
     def _handle_result(self, result, done):
         kind, title, hint = ENROLL_RESULTS.get(
             result, ("driver", result, "Not a documented fprintd result."))
+
+        # `not done` is load-bearing, not caution: a terminal result must
+        # reach the restart machinery below. Swallowing one would hang the
+        # window with nothing in the log -- ../CLAUDE.md rule 3.
+        if not done and self._looks_phantom(result):
+            # The same 10 s timeout as in calibration (§20u), and here it
+            # did worse than drag a score down: the repeats counter drove
+            # it, so three phantoms on an untouched pad produced "the
+            # driver may simply not handle this sensor" -- a verdict about
+            # the hardware, assembled out of the hardware idling. Checked
+            # before close_open_contact() so the strip is never asked to
+            # invent a contact for it.
+            self._note_phantom(title)
+            self._update_tally()
+            return
+
+        # Every path below accounts for this result, so the press that
+        # produced it is spent. See PHANTOM_RESULTS.
+        self._press_seen = False
+
         # Pair the result with the contact that produced it. A result can
         # arrive while the driver still reports the finger down, so the contact
         # is closed here rather than waiting for an off-transition that may
@@ -2909,6 +3520,10 @@ class EnrollWindow(Adw.Window):
 
         if kind == "stage":
             self.passed += 1
+            # High-water mark, kept across restarts: it is what separates
+            # "faulting intermittently while making progress" from "accepting
+            # a stage and losing it every single time". See MAX_STALLED_RESTARTS.
+            self._best_passed = max(self._best_passed, self.passed)
             self.dots.set_passed(self.passed)
             self.count_label.set_text(f"{self.passed} / {self.stages or '?'}")
             self.strip.mark("stage", duration)
@@ -2966,6 +3581,40 @@ class EnrollWindow(Adw.Window):
         # ours. Restart rather than making the user re-authorize, and count it
         # like any other attempt so the tally stays the record. This branch
         # must run before _stop(), which would unsubscribe the signal.
+        # The lockout first (§20t): it arrives as `enroll-disconnected`, the
+        # same string as a protocol error and as a real unplug. Restarting
+        # into a hot device is futile -- every EnrollStart is refused in under
+        # a second, so §20k's loop would spend all three dry restarts in a
+        # fraction of a second and then blame a wedged endpoint.
+        if kind == "driver" and self._looks_thermal(
+                time.monotonic() - self._armed_since
+                if self._armed_since is not None else None):
+            armed = int(self._armed_seconds())
+            self.attempts += 1
+            self.tally[title] = self.tally.get(title, 0) + 1
+            self._add_log("driver", "Thermal lockout",
+                          f"{title} after ~{armed}s armed; evidence: "
+                          f"{self._thermal_evidence or 'armed budget'}; not a "
+                          "wedged endpoint — do not rebind")
+            self._stop(release=True)
+            self.status_label.set_text("libfprint cut the reader off (thermal)")
+            self.hint_label.set_text(
+                f"Nothing here was your gesture. libfprint disables the sensor "
+                f"after {int(self.THERMAL_HOT_S)}s of being ARMED, and an "
+                f"enrolment holds it armed from the first stage to the last — "
+                f"so an enrolment has to FIT inside three minutes. This one "
+                f"ran {armed}s. Wait about {int(self.THERMAL_COOL_S)}s, then "
+                f"press Try again and keep it brief: one firm press per stage, "
+                f"lift fully between them. Confirm with "
+                f"`journalctl -u fprintd | tail -3`. §20t.")
+            self._update_tally()
+            self.phase = "idle"
+            self._set_stages_note()
+            self.cal_button.set_sensitive(True)
+            self.start_button.set_sensitive(True)
+            self.start_button.set_label("Try again")
+            return
+
         if kind == "driver" and self._may_restart():
             self.attempts += 1
             self.tally[title] = self.tally.get(title, 0) + 1
@@ -3016,6 +3665,32 @@ class EnrollWindow(Adw.Window):
         up" and "the panel decided your gesture was wrong" look identical from
         the outside and only one of them is true.
         """
+        if (self.restarts >= self.MAX_STALLED_RESTARTS
+                and self._best_passed == 1):
+            # EXACTLY one: a stage has been accepted and the run never got
+            # past it. `== 0` is a different situation and must keep the old
+            # governors -- §20l's successful 6/6 needed this loop to survive
+            # protocol errors that arrived BEFORE any stage passed, and the
+            # message below would be a lie about it ("every accepted stage"
+            # when none was). `> 1` is the intermittent case MAX_RESTARTS is
+            # for. Caught by tests 5 and 6, which failed when this read `<= 1`.
+            #
+            # Checked FIRST, because it is the specific diagnosis and 3 < 15.
+            # Deliberately no rebind advice: nothing is wedged -- the captures
+            # are being accepted. §20w.
+            self._restart_block = (
+                f"Every accepted stage is being discarded before the next "
+                f"capture can arm: {self.restarts} restarts and never past "
+                f"stage 1 of {self.stages or '?'}. The reader is reading you "
+                f"— the captures are ACCEPTED — so this is not your finger, "
+                f"not the 180s clock and not the stored print. fprintd throws "
+                f"the partial enrolment away on the first driver fault, so an "
+                f"enrolment that cannot survive one stage-to-stage re-arm "
+                f"cannot finish at all. Close this window and run "
+                f"./fp-debug.sh press — that is the measurement that shows "
+                f"whether the fault follows the re-arm, and it is the one "
+                f"thing still unrun.")
+            return False
         if self.restarts >= self.MAX_RESTARTS:
             self._restart_block = (
                 f"That is {self.restarts} restarts; stopping here rather than "
@@ -3119,6 +3794,10 @@ class EnrollWindow(Adw.Window):
             self._last_phase = self.phase
         self.phase = "idle"
         self.running = False
+        self._arm_stopped()
+        if self._thermal_id is not None:
+            GLib.source_remove(self._thermal_id)
+            self._thermal_id = None
         self.stop_button.set_sensitive(False)
         if self._tick_id is not None:
             GLib.source_remove(self._tick_id)
@@ -3131,7 +3810,8 @@ class EnrollWindow(Adw.Window):
                 except (TypeError, AttributeError):
                     pass
                 setattr(self, attr, None)
-        if release and self.device is not None and not self._released:
+        if (release and self.device is not None
+                and self._claimed and not self._released):
             # Stop the operation this claim was actually being used for. The
             # wrong one raises, which is caught -- but calling only the right
             # one keeps the journal readable, and a leaked claim leaves the
@@ -3143,6 +3823,10 @@ class EnrollWindow(Adw.Window):
             # "Device was not claimed before use" for both calls -- a line
             # that reads exactly like a claim leak and is the opposite of one.
             self._released = True
+            # The claim is gone the moment Release below returns, and
+            # `_claimed` is what stops a later _stop firing at an unclaimed
+            # device. Set together or they drift apart. §20v.
+            self._claimed = False
             first = "VerifyStop" if was == "calibrate" else "EnrollStop"
             for method in (first, "Release"):
                 try:

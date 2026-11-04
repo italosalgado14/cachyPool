@@ -14,6 +14,19 @@
 # files stay in repo-root form (`configs/hypr/monitors.conf`) -- those are paths, not
 # links, and are not checked here.
 #
+# Scope widened 2026-11-03 from .md/.sh/.py to *every tracked text file*. Three comments
+# under configs/ still pointed at the dissolved snapshot doc and nothing caught them,
+# because the old file list stopped at scripts -- yet CLAUDE.md requires those comments
+# to be maintained like any other document. Two concessions for non-document files:
+#
+#   * backticks are optional. A config comment writes `runbooks/gpu-video.md §12` plain,
+#     and demanding markdown punctuation in a .conf would be the wrong fix.
+#   * either path form resolves. A mirrored config is installed at a live path where
+#     "relative to this file" is meaningless -- ../../runbooks/ from /etc/modprobe.d/
+#     points nowhere real -- so repo-root form is accepted there too. Documents stay
+#     strict: for a .md file only the file-relative form passes, which is the exact
+#     breakage the restructure shipped and this script was written to catch.
+#
 #   ./tests/check-doc-refs.sh
 #
 # Checks:
@@ -37,8 +50,13 @@ import os, re, sys, subprocess
 
 tracked = subprocess.run(['git','ls-files'],capture_output=True,text=True).stdout.split()
 md_basenames = {os.path.basename(f) for f in tracked if f.endswith('.md')}
-files = [f for f in tracked if f.endswith(('.md','.sh','.py'))
-         or f in ('triton-panel/triton-panel','triton-panel/triton-ctl')]
+BINARY = ('.jpg','.jpeg','.png','.gif','.webp','.ico','.pdf','.zip','.gz','.xz','.woff','.woff2')
+def is_text(f):
+    if f.lower().endswith(BINARY): return False
+    try:
+        with open(f, 'rb') as fh: return b'\0' not in fh.read(8192)
+    except OSError: return False
+files = [f for f in tracked if is_text(f)]
 
 heads = {}
 def sections(path):
@@ -58,24 +76,44 @@ for f in files:
     # regions a document fences off on purpose (e.g. a table of pre-move paths)
     text = re.sub(r'<!-- doc-refs: ignore.*?<!-- /doc-refs: ignore -->', '', text, flags=re.S)
 
-    for m in re.finditer(r'`([A-Za-z0-9_./-]+\.md)`(\s*§(\d+))?', text):
+    is_doc = f.endswith('.md')
+    pat = (r'`([A-Za-z0-9_./-]+\.md)`(\s*§(\d+))?' if is_doc else
+           r'(?<![A-Za-z0-9_./-])`?([A-Za-z0-9_./-]+\.md)`?(\s*§(\d+))?')
+
+    for m in re.finditer(pat, text):
         rel, sec = m.group(1), m.group(3)
         base = os.path.basename(rel)
         if base not in md_basenames:
+            # a repo document that exists on disk but is not tracked would otherwise be
+            # waved through as "external", so a reference to a file someone forgot to
+            # git add would pass silently. Say so instead.
+            for c in ([os.path.normpath(os.path.join(d, rel)), os.path.normpath(rel)]
+                      if not f.endswith('.md') else [os.path.normpath(os.path.join(d, rel))]):
+                if os.path.exists(c):
+                    notes.append(f'{f}: {rel} -> exists at {c} but is untracked; git add it '
+                                 f'so its sections are checked')
+                    break
             external.add(base)
+            # naming the dissolved doc as history is legitimate (banners, archive,
+            # the CHANGELOG mapping). Only a §N *pointer* at it is an error: that is a
+            # live reference to a section that now lives somewhere else.
             if base == 'finish-installation-commands.md' and sec:
-                errors.append(f'{f}: `{rel}` §{sec} -> dissolved 2026-11-03, re-point it '
+                errors.append(f'{f}: {rel} §{sec} -> dissolved 2026-11-03, re-point it '
                               f'(mapping table in CHANGELOG.md)')
             continue
-        target = os.path.normpath(os.path.join(d, rel))
+        # a document must resolve relative to itself; any other file may also use
+        # repo-root form, because it is a mirror of a live path (see header)
+        cands = [os.path.normpath(os.path.join(d, rel))]
+        if not is_doc: cands.append(os.path.normpath(rel))
         checked += 1
-        if not os.path.exists(target):
-            errors.append(f'{f}: `{rel}` -> missing ({target}); '
+        target = next((c for c in cands if os.path.exists(c)), None)
+        if target is None:
+            errors.append(f'{f}: {rel} -> missing (tried {", ".join(cands)}); '
                           f'write document paths relative to the referring file')
         elif sec is not None:
-            s = sections(target)
-            if s is not None and sec not in s:
-                errors.append(f'{f}: `{rel}` §{sec} -> no "## {sec}." heading in {target}')
+            sect = sections(target)
+            if sect is not None and sec not in sect:
+                errors.append(f'{f}: {rel} §{sec} -> no "## {sec}." heading in {target}')
 
     if f.endswith('.md'):
         own = sections(f) or set()

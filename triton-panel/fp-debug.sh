@@ -42,6 +42,7 @@
 #          ./fp-debug.sh swipe     # roll edge-to-edge without losing contact
 #          ./fp-debug.sh verify    # measure MATCHING, enrols nothing
 #          ./fp-debug.sh presence  # trace finger-present; enrols nothing
+#          ./fp-debug.sh thermal   # measure the 180s lockout; NEEDS NO FINGER
 #          ./fp-debug.sh rebind    # recover a wedged reader, no enrolment
 #
 # Added 2026-11-01 (§20s): a `presence` mode, which is the thing that should
@@ -51,6 +52,17 @@
 # fix had made the device deaf for 3 s after every result. Neither would have
 # been written if this trace had existed. It answers one question directly:
 # does this driver report finger-present going FALSE, and when?
+#
+# Added 2026-11-03 (§20t): a `thermal` mode. libfprint carries a TIME-BASED
+# temperature model -- not a thermometer -- and an armed verify counts as
+# "active" even while it waits for a finger that never comes. After
+# DEFAULT_TEMP_HOT_SECONDS (180) the device is cut off with
+# FP_DEVICE_ERROR_TOO_HOT, which fprintd renames `verify-disconnected`, the
+# same string it uses for a protocol error and for a real unplug. That is what
+# kills fingerprint unlock on every lock older than three minutes. This mode
+# measures it, and it is the ONLY instrument here that needs no finger, no
+# sudo and no fprintd restart -- a restart would reset the very model being
+# measured.
 # ---------------------------------------------------------------------------
 set -uo pipefail
 
@@ -142,8 +154,8 @@ if [ "$GESTURE" = "rebind" ]; then
 fi
 
 case "$GESTURE" in
-  press|swipe|verify|presence) ;;
-  *) echo "usage: $0 {press|swipe|verify|presence|rebind}" >&2; exit 2 ;;
+  press|swipe|verify|presence|thermal) ;;
+  *) echo "usage: $0 {press|swipe|verify|presence|thermal|rebind}" >&2; exit 2 ;;
 esac
 
 # -- this must run inside the graphical session, not a tty ------------------ #
@@ -249,6 +261,182 @@ EOF
   printf '\nIf the false count is 0 or much lower than the true count, the lift is\n'
   printf 'not being reported and the panel is relying on its wall-clock escape\n'
   printf '(SAME_PRESS_S) rather than on the driver. See §20s.\n\n'
+  exit 0
+fi
+
+# -- thermal lockout: no sudo, no drop-in, no restart, NO FINGER ------------ #
+#
+# libfprint's temperature model is a duty-cycle estimate, not a sensor read:
+# the ratio rises toward 1 with a time constant of temp_hot_seconds (default
+# 3*60) while the device is in an operation, and decays with temp_cold_seconds
+# (default 9*60) while it is idle. An ARMED VERIFY IS AN OPERATION, so merely
+# waiting for a finger burns the budget. At the HOT threshold the running
+# operation is cancelled with FP_DEVICE_ERROR_TOO_HOT and every new one is
+# refused instantly until the ratio decays back past 0.5.
+#
+# Do not touch the pad while this runs: a touch does not invalidate the trip,
+# but it makes the run stop being a clean no-finger measurement, and the
+# script says so if it sees one.
+if [ "$GESTURE" = "thermal" ]; then
+  trap - EXIT INT TERM
+  LOG="$HERE/thermal-$(date +%Y%m%d-%H%M%S).log"
+  cat <<'EOF'
+
+================================================================================
+ THERMAL LOCKOUT MEASUREMENT -- enrols nothing, deletes nothing, writes
+ nothing, and NEEDS NO FINGER.
+
+   *** Keep your hand OFF the reader for the whole run. ***
+
+ It arms one verify, leaves it armed, and waits. Expect:
+   * a `verify-swipe-too-short` retry every ~10 s -- that is the elan command
+     timeout (ELAN_CMD_TIMEOUT 10000) with too few frames, NOT your finger;
+   * a `verify-disconnected` terminal result at ~180 s -- that is
+     FP_DEVICE_ERROR_TOO_HOT, confirmable in `journalctl -u fprintd`;
+   * every re-arm refused in ~0.0 s until the model cools (~3.5 min more).
+
+ Runs about 7 minutes. Ctrl-C is safe: the claim is released on the way out.
+================================================================================
+EOF
+  PROBE_S="${PROBE_S:-20}" QUIET_S="${QUIET_S:-12}" HOT_CAP="${HOT_CAP:-300}" \
+  python3 - 2>&1 <<'PY' | tee "$LOG"
+import os, time
+from gi.repository import Gio, GLib
+
+BUS, IFACE = "net.reactivated.Fprint", "net.reactivated.Fprint.Device"
+PROBE_S = float(os.environ.get("PROBE_S", 20))
+QUIET_S = float(os.environ.get("QUIET_S", 12))
+HOT_CAP = float(os.environ.get("HOT_CAP", 300))
+INSTANT_S = 5.0          # a terminal result faster than this is a refusal
+COOL_CAP = 600.0         # stop probing for recovery after this long
+
+t0 = time.monotonic()
+def log(*a):
+    print(f"{time.monotonic() - t0:7.1f}s {time.strftime('%H:%M:%S')}", *a, flush=True)
+
+bus = Gio.bus_get_sync(Gio.BusType.SYSTEM, None)
+dev = bus.call_sync(BUS, "/net/reactivated/Fprint/Manager",
+                    "net.reactivated.Fprint.Manager", "GetDefaultDevice",
+                    None, GLib.VariantType("(o)"), 0, 10000, None).unpack()[0]
+
+def call(method, args=None, sig=None):
+    return bus.call_sync(BUS, dev, IFACE, method,
+                         GLib.Variant(sig, args) if sig else None,
+                         None, 0, 30000, None)
+
+st = {"armed_at": None, "trip_at": None, "phase": "burn", "touched": False,
+      "since_arm": [], "retries": 0, "refusals": 0, "trip_after": None,
+      "last_refusal": None, "cool_at": None}
+
+def arm():
+    try: call("VerifyStop")
+    except GLib.Error: pass
+    try:
+        call("VerifyStart", ("any",), "(s)")
+    except GLib.Error as e:
+        st["armed_at"] = None
+        log("ARM REFUSED BY fprintd:", e.message)
+        return False
+    st["armed_at"] = time.monotonic()
+    st["since_arm"] = []
+    log("ARMED")
+    return True
+
+def on_signal(_c, _s, _p, _i, name, params):
+    if name != "VerifyStatus":
+        if name == "VerifyFingerSelected":
+            log("VerifyFingerSelected", params.unpack()[0])
+        return
+    result, done = params.unpack()
+    dt = time.monotonic() - (st["armed_at"] or time.monotonic())
+    st["since_arm"].append((dt, result, done))
+    log(f"VerifyStatus result={result!r} done={done} (+{dt:.1f}s since arm)")
+    if not done:
+        st["retries"] += 1
+        return
+    if st["phase"] == "burn" and dt > INSTANT_S:
+        st["phase"] = "cool"
+        st["trip_at"] = time.monotonic()
+        st["trip_after"] = dt
+        log(f"*** TRIP after {dt:.1f}s armed with no finger -> {result!r}")
+        log("    cross-check: journalctl -u fprintd | tail -3")
+        GLib.timeout_add_seconds(int(PROBE_S), probe)
+    elif st["phase"] == "cool":
+        st["refusals"] += 1
+        st["last_refusal"] = time.monotonic()
+        log(f"still refusing ({dt:.1f}s after arm) -- model is HOT")
+
+def on_props(_c, _s, _p, _i, _n, params):
+    _, changed, _ = params.unpack()
+    if "finger-present" in changed:
+        log("finger-present ->", changed["finger-present"])
+        if changed["finger-present"]:
+            st["touched"] = True
+            log("    !! a touch was seen: this is no longer a clean no-finger run")
+
+bus.signal_subscribe(BUS, IFACE, None, dev, None, 0, on_signal)
+bus.signal_subscribe(BUS, "org.freedesktop.DBus.Properties",
+                     "PropertiesChanged", dev, None, 0, on_props)
+
+def probe():
+    if st["phase"] != "cool":
+        return False
+    if time.monotonic() - st["trip_at"] > COOL_CAP:
+        finish("gave up waiting for the cooldown")
+        return False
+    log("-- recovery probe --")
+    if arm():
+        GLib.timeout_add_seconds(int(QUIET_S), check_quiet)
+        return False
+    return True
+
+def check_quiet():
+    if st["phase"] != "cool":
+        return False
+    if not [r for r in st["since_arm"] if r[2]]:
+        st["cool_at"] = st["armed_at"]
+        finish("recovered")
+        return False
+    GLib.timeout_add_seconds(int(PROBE_S), probe)
+    return False
+
+def burn_cap():
+    if st["phase"] == "burn":
+        log(f"no trip within {HOT_CAP:.0f}s -- the model may be disabled for "
+            f"this driver, or the device was already cooling")
+        finish("no trip")
+    return False
+
+def finish(why):
+    log("finishing:", why)
+    for m in ("VerifyStop", "Release"):
+        try: call(m)
+        except GLib.Error: pass
+    log("released")
+    print("\n=== SUMMARY ===")
+    if st["trip_after"]:
+        print(f"  trip             : {st['trip_after']:.1f}s of armed, "
+              f"idle verify (expected ~180s = DEFAULT_TEMP_HOT_SECONDS)")
+    else:
+        print("  trip             : none seen")
+    print(f"  10s retries first: {st['retries']} "
+          f"(elan command timeout, not a gesture)")
+    print(f"  instant refusals : {st['refusals']}")
+    if st["cool_at"] and st["trip_at"]:
+        lo = (st["last_refusal"] - st["trip_at"]) if st["last_refusal"] else 0.0
+        hi = st["cool_at"] - st["trip_at"]
+        print(f"  cooldown         : in ({lo:.0f}, {hi:.0f}]s after the trip "
+              f"(model predicts ~205s)")
+    print(f"  clean no-finger  : {not st['touched']}")
+    loop.quit()
+
+call("Claim", ("",), "(s)")
+log("claimed; arming one verify and leaving it armed. HANDS OFF.")
+arm()
+loop = GLib.MainLoop()
+GLib.timeout_add_seconds(int(HOT_CAP), burn_cap)
+loop.run()
+PY
   exit 0
 fi
 

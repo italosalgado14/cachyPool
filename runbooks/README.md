@@ -20,6 +20,7 @@ in. See `../CHANGELOG.md` for the move and the old-section mapping.
 | `monitors.md` | Per-panel scaling, layout profiles, Hyprmon as editor / `monitor-mode.sh` as applier | §5 §16 |
 | `power-battery.md` | The 80% charge cap, `predator_v4` fans + platform profile, the power-source daemon | §14 §17 §19 |
 | `triton-panel.md` | Deploying the panel: privileged helper, sudoers, desktop entry | §18 |
+| `updates.md` | Keeping `pacman -Syu` from reverting a documented fix: the gate, the `.pacnew` deltas, moving premises, rollback | §1–§7 |
 
 ## Section numbers are preserved
 
@@ -33,7 +34,8 @@ grep -rn '§20g' runbooks/ archive/     # find a section by number, whatever mov
 
 Numbering is therefore **not contiguous** inside a file: `boot-suspend.md` runs §0, §6, §10,
 §11, §15. That is the cost of keeping references alive, and it is the cheaper side of the
-trade. A **new** runbook starts its own numbering from §1; do not extend the old sequence.
+trade. A **new** runbook starts its own numbering from §1; do not extend the old sequence —
+`updates.md` is the first of those, and runs §1–§7.
 
 Each runbook ends with an unnumbered `## Issue history` section — the incident analyses that
 used to be stuffed into `../ACTUAL-CONFIGURATION.md` §15 table cells, one of which had reached

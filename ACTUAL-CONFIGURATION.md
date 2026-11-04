@@ -48,13 +48,14 @@ native / ~130 effective renders noticeably larger, which is expected, not a misc
 Both externals arrive as **DP tunnels over the single Thunderbolt connector** (Plugable
 TBT4-UD5 on `typec port0`), so whichever tunnel trains first takes the low number.
 
-Since **2026-08-03 nothing depends on the port name**: `monitors.conf` binds both
-externals by EDID **description** (`desc:` — a prefix match), and *every* profile in
-`monitor-mode.sh` resolves panels by capability. Before that change the name-bound
+Since **2026-08-03 nothing depends on the port name**: both externals are bound by EDID
+**description** (`desc:` — a prefix match) — now in `lua/monitors.lua` for the geometry and
+`lua/workspaces.lua` for the workspace blocks. Before that change the name-bound
 `workspace = N, monitor:DP-*` rules silently put workspaces **1–3 (the primary set) on
-the 16" portable** and 6–9 on the Xiaomi. The live arrangement is chosen by a hotplug
-daemon (`trio` / `read` / `onescreen` / `laptop`) — see §11 "Monitor profiles &
-auto-switching".
+the 16" portable** and 6–9 on the Xiaomi. ⚠ Since **2026-11-03** the live arrangement is
+**not** chosen by a hotplug daemon: the profile system is parked and `lua/monitors.lua` is
+the static layout — see §11 and `runbooks/monitors.md` §16. Workspaces are **per monitor**
+(ten slots each, `runbooks/monitors.md` §21), not the old global 1–9 split.
 
 The static 3-across `desktop` profile was **re-fitted for the Xiaomi on 2026-08-03**
 (logical geometry): `eDP-1` 0–2048 · Xiaomi 2048–5120 (3072 wide) · portable QHD
@@ -281,45 +282,66 @@ All Hyprland-side autostarts are live and producing visible output (bar, wallpap
 
 ## 11. Hyprland Config Layout
 
+**The config is Lua since 2026-11-03** — Hyprland 0.57.1 removed the `hyprlang` parser, so
+the `.conf` files below are **inert** and kept for reference only (`runbooks/updates.md` §4).
 All under `~/.config/hypr/` and mirrored in this repo at `configs/hypr/`:
 
 ```
-hyprland.conf      ← entrypoint, sources the others
-env.conf           ← NVIDIA + Qt + cursor env vars
-monitors.conf      ← 3-monitor layout, scale 1.25 on 2560×1600 outputs
-input.conf         ← keyboard layout, touchpad, 3-finger gesture
-look.conf          ← Catppuccin Mocha colors, dwindle, animations, blur+shadow
-keybindings.conf   ← every shortcut (see shortcuts.md)
-windowrules.conf   ← floats for dialogs (pavucontrol, blueman, polkit, PiP)
-autostart.conf     ← exec-once for all daemons
+hyprland.lua       ← entrypoint: sets package.path from its own path, requires lua/
+lua/env.lua        ← NVIDIA + Qt + cursor env vars (hl.env), software cursors
+lua/monitors.lua   ← the ONLY owner of geometry now: static 3-across, scale 1.25
+lua/workspaces.lua ← per-monitor workspace blocks (runbooks/monitors.md §21)
+lua/input.lua      ← keyboard layout, touchpad, 3-finger gesture
+lua/look.lua       ← Catppuccin Mocha colors, dwindle, animations, blur+shadow, groupbar
+lua/windowrules.lua← floats for dialogs (pavucontrol, blueman, polkit, PiP) + the terminal tag
+lua/qconsole.lua   ← the Quake console's special workspace, dim and per-monitor refit
+lua/bind.lua       ← bind(keys, description, action) — the description feeds Super+K
+lua/bindings-apps.lua       ← terminal, browser, launcher, file manager, close, exit
+lua/bindings-tiling.lua     ← tiling, workspaces, monitors, groups, scratchpad, console
+lua/bindings-utilities.lua  ← cheatsheet, lock, notifications, toggles, zoom, capture, lid, media
+lua/bindings-clipboard.lua  ← universal clipboard (Super+C/V/X/A)
+lua/autostart.lua  ← hl.on("hyprland.start") for all daemons
 hyprpaper.conf     ← block-syntax wallpaper bindings (workaround for 0.8.4 parser bug)
 hyprlock.conf      ← Catppuccin password input + big clock + blurred wallpaper
 hypridle.conf      ← 5m lock / 10m DPMS / 20m suspend
-monitors-read.conf ← alternate "read" profile (portrait external, laptop OFF); NOT sourced, applied live
-monitors-trio.conf ← alternate "trio" profile (both 16" portables + laptop centered); NOT sourced, reference only — monitor-mode.sh resolves the geometry by capability (added 2026-07-08)
+*.conf (the rest)  ← INERT: env/monitors/input/look/keybindings/windowrules/autostart and the
+                     monitors-read / monitors-trio profiles. Nothing reads them
 scripts/monitor-mode.sh        ← apply a named layout: desktop|read|laptop|onescreen|trio|toggle
 scripts/monitor-autoswitch.sh  ← daemon: auto-picks layout from connected displays (autostart.conf)
 scripts/power-autoswitch.sh    ← daemon: follows the power source — 60 Hz + power-saver on battery,
-                                 240 Hz + the previous profile on AC (autostart.conf; added 2026-10-31)
+                                 240 Hz + the previous profile on AC (autostart.lua; added 2026-10-31)
+scripts/edp-rate.sh            ← the only owner of eDP-1's refresh rate; applies with `hyprctl eval`
+                                 (added 2026-11-03, lifted out of the parked monitor-mode.sh)
 scripts/monitor-menu.sh        ← Walker dmenu "Setup > Monitors": fitting profiles · Hyprmon editor · live layout (Super+Shift+M and the "Monitors" Walker entry; added 2026-10-15)
 scripts/hyprmon-edit.sh        ← launches hyprmon as the profile editor with its config write + reload neutered (added 2026-10-15)
-scripts/show-shortcuts.sh      ← curated keybinding cheatsheet in a floating Kitty window (Super+/ and the "Shortcuts" Walker entry; added 2026-06-17)
+scripts/show-shortcuts.sh      ← keybinding cheatsheet in a floating Kitty window, GENERATED from
+                                 `hyprctl binds -j` descriptions (Super+K, Super+/ and the "Shortcuts"
+                                 Walker entry; added 2026-06-17, made generated 2026-11-03)
 ```
 
 Outside `~/.config/hypr/`: `~/.config/hyprmon/profiles/{desktop,read}.json` (mirrored in `configs/hyprmon/profiles/`) hold the Hyprmon-edited geometry for those two profiles.
 
-**eDP-1's refresh rate has exactly one owner (since 2026-10-31):** `edp_mode()` in
-`monitor-mode.sh`, which resolves `2560x1600@240` or `@60` from the power source and the
+**⚠ The monitor profile system is parked (2026-11-03).** `monitor-mode.sh`,
+`monitor-autoswitch.sh`, `monitor-menu.sh` and `hyprmon-edit.sh` all drive the layout through
+`hyprctl keyword`, which 0.57.1 removed. They are not started and no key is bound to them;
+`lua/monitors.lua` holds the geometry and there is no profile switching or hotplug reconcile.
+`runbooks/monitors.md` §16 has the port plan.
+
+**eDP-1's refresh rate has exactly one owner (since 2026-10-31, re-homed 2026-11-03):**
+`scripts/edp-rate.sh`, which resolves `2560x1600@240` or `@60` from the power source and the
 `~/.config/triton-panel/power-auto` toggle. Every site that emits an eDP-1 spec calls it —
 there is no `2560x1600@240` literal left in that script, and `apply_from_profile` overrides
 eDP-1's Hz with `--argjson edphz` because the hyprmon JSON carries `240.00301` (the profiles
 were saved while docked on AC). Before this, the rate was hardcoded at 8 sites plus that 9th
 JSON path, so anything setting it from outside was undone by the next profile apply, hotplug
-autoswitch or `hyprctl reload`. `monitor-mode.sh edp-rate` is the reconcile hook
+autoswitch or `hyprctl reload`. `edp-rate.sh` is the reconcile hook
 `power-autoswitch.sh` calls; it is not a layout and deliberately touches neither `$STATE` nor
 the fingerprint handshake. See `runbooks/power-battery.md` §19.
 
-### Monitor profiles & auto-switching (added 2026-06-10)
+### Monitor profiles & auto-switching (added 2026-06-10) — ⚠ PARKED 2026-11-03
+
+> Kept as the description of what the profile system does, and what the port has to restore.
+> None of it is running: see the note above and `runbooks/monitors.md` §16.
 
 `monitors.conf` still defines the static 3-across "desktop" layout, but the live layout
 is now driven by **`scripts/monitor-autoswitch.sh`**, a daemon launched from
@@ -527,7 +549,14 @@ when resolved; never delete one.
 | Firefox freeze 2026-07-02 21:10 — whole session wedged | 🔧 Mitigated 2026-07-02 → `runbooks/gpu-video.md`, *Issue history* |
 | Nothing reacted to the power source | ✅ Resolved 2026-10-31; **AC steady state verified 2026-11-03** (240 Hz + `balanced` + empty `saved_profile`). ⚠ The plug/unplug **transition** is still untested — no longer blocked on a charger → `runbooks/power-battery.md` §19 |
 | `plymouthd` spinning forever with nothing to draw | ✅ **Resolved 2026-11-02** → `runbooks/boot-suspend.md`, *Issue history* |
-| Fingerprint reader never used | ✅ **Resolved 2026-11-01 → `runbooks/fingerprint.md`, *Issue history* |
+| Fingerprint reader never used | ✅ **Resolved 2026-11-01** → `runbooks/fingerprint.md`, *Issue history* |
+| Fingerprint unlock dies ~3 min into every lock | ⚠ Open 2026-11-03 — measured, no finger involved → `runbooks/fingerprint.md` §20t, *Issue history* |
+| Panel scored an untouched pad every 10 s | ✅ **Resolved 2026-11-03** — presence measured, counting rule moved → `runbooks/fingerprint.md` §20u, *Issue history* |
+| Fingerprint **verify** fails 7/7 | ⚠ Open 2026-11-03 — all `no-match` with minutiae extracted, so it is the template → `runbooks/fingerprint.md` §20m, §20q, §20u, *Issue history* |
+| ⚠ **Enrolment blocked: protocol error between stages** | ⚠ Open 2026-11-03 — **cause found in `elan.c`**: the sensor's documented `0x00`/`0xaf` ("not ready" / "finger removed or sensor busy") are retried only for `ELAN_0C58` and are fatal for `0c4f`. Patch written, **not applied** — the 2026-11-03 upgrade ran, so what is owed is the reboot and four build packages → `patches/README.md`, `runbooks/fingerprint.md` §20w, §20x |
+| ⚠ **Zero prints enrolled** | ⚠ Open 2026-11-03 — the 6/6 print was destroyed by starting an enrolment into its own slot; hyprlock switch turned itself **off** when the last print went → `runbooks/fingerprint.md` §20v, *Issue history* |
+| Enroll window blocked its own recovery (Calibrate with no print, false "not claimed", log lost under Walker) | ✅ **Resolved 2026-11-03** → `runbooks/fingerprint.md` §20v, *Issue history* |
+| Same-press gate swallowed driver faults + the thermal lockout | ✅ **Resolved 2026-11-03** → `runbooks/fingerprint.md` §20v, *Issue history* |
 | i915 NULL deref in `__gen8_ppgtt_clear` during GPU-hang recovery | ⚠ Open → `runbooks/gpu-video.md`, *Issue history* |
 | NVIDIA GSP "Reset required" after s2idle resume | ⚠ Open → `runbooks/boot-suspend.md`, *Issue history* |
 | VLC not installed (video playback) | ✅ Resolved 2026-07-31 → `runbooks/gpu-video.md`, *Issue history* |
@@ -539,6 +568,11 @@ when resolved; never delete one.
 | Monitor layouts only editable as hand-written coordinates | ✅ Resolved 2026-10-15/16. → `runbooks/monitors.md`, *Issue history* |
 | No fan RPM and no platform profile on this model | ✅ **Resolved 2026-10-31, reboot-verified 2026-11-03** — `predator_v4`=`Y` after a real boot, 5 profile states, `acer-isa-0ace` reading fans and temps, ppd mapping confirmed → `runbooks/power-battery.md` §17 |
 | All of this only reachable from a terminal | ✅ **Resolved 2026-10-31, fully installed 2026-11-03** — the last outstanding piece, the sudoers rule, is live (`sudo -ln`) → `runbooks/triton-panel.md` §18 |
+| Update backlog and `.pacnew` drift | ⚠ **Open 2026-11-03, partly cleared the same day.** ✅ The backlog is gone — `paru -Syu` moved **662 packages** at 18:47 (kernel 7.3.1, NVIDIA 615.78.08); ✅ `paccache.timer` enabled. ⚠ Still open: the **reboot** the new kernel needs, **11 `.pacnew`** unmerged — none added by this upgrade; the one that matters is `/etc/pam.d/sudo.pacnew` (2026-06-17, owned by `sudo`), which drops the `pam_fprintd` line — `snap-pac` at defaults so the kernel snapshot has no protected quota, and the rollback path still **never once booted**. *Found 2026-11-03: 648 pending, last upgrade 2026-09-26, 12 `.pacnew` with the oldest from April 2026.* → `runbooks/updates.md` |
+| Hyprland is retiring `hyprlang` for a Lua config | ✅ **Resolved 2026-11-03** — 0.57.1 removed the parser; the config is now `hyprland.lua` + `lua/*.lua`, with Omarchy's keymap. Three of this repo's own predictions were wrong → `runbooks/updates.md` §4, §4g |
+| ⚠ **Monitor profile system parked by the Lua migration** | ⚠ Open 2026-11-03 — 12 `hyprctl keyword` call sites to port; `lua/monitors.lua` is the static geometry meanwhile → `runbooks/monitors.md` §16 |
+| ⚠ **The new monitor config is unverified with the externals** | ⚠ Open 2026-11-03 — the dock was disconnected all migration; only eDP-1 was exercised → `runbooks/monitors.md` §21 |
+| `hyprpicker` missing for the new `Super+Print` bind | ⚠ Open 2026-11-03 — waits for the next full `paru -Syu` → `runbooks/updates.md` §1 |
 
 ---
 
@@ -564,7 +598,8 @@ cachyPool/
 │   ├── gpu-video.md                   ← §12 §13: Firefox freeze, VA-API on the iGPU, decode paused, VLC
 │   ├── monitors.md                    ← §5 §16: scaling, profiles, Hyprmon as editor
 │   ├── power-battery.md               ← §14 §17 §19: 80% cap, predator_v4 fans, power-source daemon
-│   └── triton-panel.md                ← §18: deploying the panel (helper, sudoers, desktop entry)
+│   ├── triton-panel.md                ← §18: deploying the panel (helper, sudoers, desktop entry)
+│   └── updates.md                     ← §1–§7: the upgrade gate, .pacnew deltas, moving premises, rollback
 ├── archive/                           ← superseded, kept not deleted. Do not follow these steps.
 │   ├── README.md                      ← what "archive" means here and why nothing is deleted
 │   ├── cachyos-hyprland-setup.md      ← original install guide (May 2026)
@@ -581,9 +616,14 @@ cachyPool/
 │   ├── fp-debug.sh                    ← fprintd enrol+verify harness (`runbooks/fingerprint.md` §20n)
 │   ├── README.md                      ← what the app shows, privileges, the keyboard-backlight caveat
 │   └── waybar/                        ← optional Waybar modules, same data in the bar (NOT applied)
+├── patches/                           ← patches against third-party source. NOTHING here is applied.
+│   ├── README.md                      ← the two rules, the build/test/rollback procedure
+│   └── libfprint-elan-0c4f-busy-retry.patch  ← 3 lines; the enrolment blocker (`runbooks/fingerprint.md` §20x)
 ├── tests/                             ← regression tests for the scripts in configs/ (never pushed live)
 │   ├── test-power-autoswitch.sh       ← the saved_profile invariant, 10 cases against the real branch text
-│   └── check-doc-refs.sh              ← every cross-document reference resolves (run after moving sections)
+│   ├── check-doc-refs.sh              ← every cross-document reference resolves (run after moving sections)
+│   ├── check-live-system.sh           ← the machine still matches the docs (before/after every upgrade)
+│   └── check-libfprint-patch.sh       ← the elan patch still applies and its flag bit still does not collide
 └── configs/                           ← mirror of live dotfiles. Not the live config — push by hand.
     ├── hypr/
     │   ├── hyprland.conf              ← entrypoint, sources the rest

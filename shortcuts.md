@@ -1,7 +1,9 @@
 # Shortcuts & Daily Usability — Hyprland on CachyOS
 
 **Machine:** Acer Predator PT516-52s (Triton 500 SE) · **Last verified:** 2026-11-03
-**Source of truth:** `~/.config/hypr/keybindings.conf` (mirrored in `configs/hypr/keybindings.conf`).
+**Source of truth:** `~/.config/hypr/lua/bindings-*.lua` (mirrored in `configs/hypr/lua/`).
+Press **`Super`+`K`** for the exhaustive list — it is generated from the binds' own
+descriptions, so it cannot go out of date. This file is the curated version, with the *why*.
 
 > **`Super`** = the Windows/⌘ key (a.k.a. `mainMod`). Every shortcut below uses Super as the anchor.
 
@@ -16,18 +18,29 @@ This is the day-to-day reference: the "memorize these first" cheatsheet up top, 
 | `Super` + `Enter` | Open Kitty terminal |
 | `Super` + `Space` | Walker app launcher |
 | `Super` + `Shift` + `Enter` | Open Firefox |
-| `Super` + `E` | File manager (Yazi in Kitty) |
-| `Super` + `Q` | Close active window |
-| `Super` + `L` | Lock screen (Hyprlock) |
-| `Super` + `M` | Toggle monitor layout — `read`↔`desktop` (desk) / `read`↔`trio` (road); manual override of the auto-switcher, see §3 |
-| `Super` + `Shift` + `M` | Monitors menu — pick a profile (only the ones that fit the connected screens), open the Hyprmon layout editor, show the live layout (also a **Monitors** entry in Walker), see §3 |
+| `Super` + `E` or `Super` + `Shift` + `F` | File manager (Yazi in Kitty) |
+| `Super` + `Q` or `Super` + `W` | Close active window |
+| `Super` + `Ctrl` + `L` | Lock screen (Hyprlock). ⚠ **`Super`+`L` alone no longer locks** — it is left free for a future workspace-layout cycle, Omarchy's meaning for that key |
+| `Super` + `M` | Minimize the window (parks it on a special workspace; `Super`+`Shift`+`M` brings them back) |
+| `Super` + `grave` | Quake console — a terminal that drops over whatever workspace you are on |
+| `Super` + `Ctrl` + `Delete` | Toggle the laptop panel (clamshell). ⚠ The five monitor **profiles** are parked — see §3 |
 | `Super` + `Shift` + `Q` | Exit Hyprland (drops to tty1 → autologin re-`exec`s Hyprland; behaves like "restart compositor". To actually log out: `Ctrl+Alt+F2` → `loginctl terminate-user isalgado`) |
 
-> The full keybinding tables follow in §1. Workflows in §2. Walker / Yazi / Kitty deep-dives in §4–§6.
+> The curated tables follow in §1 (**`Super`+`K`** prints the generated full list). Workflows
+> in §2. Walker / Yazi / Kitty deep-dives in §4–§6.
 
 ---
 
 ## 1. All keybindings
+
+Since 2026-11-03 this is **Omarchy's keymap** (their `quattro` branch), wired to this
+machine's own apps and hardware. Three things to unlearn if your hands remember the old map:
+`Super`+`L` no longer locks (`Super`+`Ctrl`+`L` does), `Super`+`V` no longer floats
+(`Super`+`T` does — `V` is paste now), and `Super`+`Shift`+arrows **swaps** windows instead of
+moving them. `Super`+`M` minimizes; it used to switch monitor profile.
+
+> **`Super`+`K`** prints the full generated list from `hyprctl binds -j`. The tables below are
+> the curated subset, in the same order as the modules in `configs/hypr/lua/`.
 
 ### 1.1 Launching things
 
@@ -36,19 +49,19 @@ This is the day-to-day reference: the "memorize these first" cheatsheet up top, 
 | `Super` + `Enter` | Open Kitty terminal |
 | `Super` + `Space` | Walker app launcher |
 | `Super` + `Shift` + `Enter` | Open Firefox |
-| `Super` + `E` | Open file manager (Yazi in Kitty) |
-| `Super` + `/` | Show the shortcuts cheatsheet (curated subset of this file; also a **Shortcuts** entry in Walker) |
-| `Super` + `L` | Lock screen (Hyprlock) |
-| `Super` + `M` | Toggle monitor layout — `read`↔`desktop` (desk) / `read`↔`trio` (road); manual override of the auto-switcher, see §3 |
-| `Super` + `Shift` + `M` | Monitors menu (Walker): fitting profiles · Hyprmon layout editor · live layout. Also a **Monitors** entry in Walker, see §3 |
-| `Super` + `Shift` + `Q` | Exit Hyprland (see Quick-reference footnote above) |
+| `Super` + `E` / `Super` + `Shift` + `F` | File manager (Yazi in Kitty) |
+| `Super` + `grave` | Quake console (drops over the current workspace; seeded with Kitty on first open) |
+| `Super` + `K` / `Super` + `/` | Shortcuts cheatsheet — generated from the binds (also a **Shortcuts** entry in Walker) |
+| `Super` + `Ctrl` + `L` | Lock screen (Hyprlock) |
+| `Super` + `Q` / `Super` + `W` | Close active window |
+| `Super` + `Shift` + `Q` | Exit Hyprland (drops to tty1 → autologin re-`exec`s Hyprland; "restart compositor". Real logout: `Ctrl+Alt+F2` → `loginctl terminate-user isalgado`) |
 
 ### 1.2 Walker modes (also reachable by typing a prefix character into Walker)
 
 | Combo | Mode | Prefix |
 |---|---|---|
 | `Super` + `Space` | Open Walker (default — apps + fuzzy search; type a prefix below to switch) | — |
-| `Super` + `.` | Emoji / symbol picker (same as Ctrl+E) | `.` |
+| `Super` + `.` | Emoji / symbol picker | `.` |
 | `Super` + `Ctrl` + `E` | Emoji / symbol picker | `.` |
 | `Super` + `Ctrl` + `V` | Clipboard history (from cliphist) | `:` |
 | (in Walker) type `=` | Calculator | `=` |
@@ -62,36 +75,68 @@ This is the day-to-day reference: the "memorize these first" cheatsheet up top, 
 
 | Combo | Action |
 |---|---|
-| `Super` + `Q` | Close active window |
-| `Super` + `F` | Toggle fullscreen |
-| `Super` + `V` | Toggle floating |
+| `Super` + `T` | Toggle floating / tiling |
+| `Super` + `F` | Fullscreen (covers the screen) |
+| `Super` + `Alt` + `F` | Maximized (fills the tiled space) — two different things |
 | `Super` + `P` | Pseudo-tile (preserve size when moving) |
 | `Super` + `J` | Toggle dwindle split direction |
+| `Super` + `M` | Minimize — parks the window on the `minimized` special workspace |
+| `Super` + `Shift` + `M` | Show the minimized windows again |
+| `Super` + `Backspace` | Toggle transparency on this window (a `transparent` tag plus an opacity rule) |
+| `Super` + `Shift` + `Backspace` | Toggle gaps on/off |
+| `Super` + `Ctrl` + `Z` / `Super` + `Ctrl` + `Alt` + `Z` | Zoom the screen in one step / reset |
+
+**Window groups (tabs in one tile):**
+
+| Combo | Action |
+|---|---|
+| `Super` + `G` | Toggle grouping on the active window |
+| `Super` + `Alt` + arrows | Pull the window into the group in that direction |
+| `Super` + `Alt` + `G` | Take it out of the group |
+| `Super` + `Alt` + `Tab` / `Super` + `Alt` + `Shift` + `Tab` | Next / previous window inside the group |
+| `Super` + `Alt` + `1`…`5` | Jump straight to the Nth window of the group |
 
 ### 1.4 Navigation (focus)
 
 | Combo | Action |
 |---|---|
-| `Super` + `←` / `→` / `↑` / `↓` | Focus neighbor window |
+| `Super` + `←` / `→` / `↑` / `↓` | Focus neighbour window |
+| `Alt` + `Tab` / `Alt` + `Shift` + `Tab` | Cycle windows without thinking in directions |
+| `Ctrl` + `Alt` + `Tab` / + `Shift` | Focus the next / previous **monitor** |
+| `Super` + `Tab` / `Super` + `Shift` + `Tab` | Next / previous workspace **on this monitor** |
+| `Super` + `Ctrl` + `Tab` | Back to the workspace you came from |
+| `Super` + scroll | Cycle this monitor's workspaces |
 | `Super` + drag (left mouse) | Move window |
 | `Super` + drag (right mouse) | Resize window |
-| `Super` + scroll | Cycle through workspaces |
 
 ### 1.5 Moving windows
 
 | Combo | Action |
 |---|---|
-| `Super` + `Shift` + `←` / `→` / `↑` / `↓` | Move active window in that direction |
+| `Super` + `Shift` + `←` / `→` / `↑` / `↓` | **Swap** this window with the one in that direction |
+| `Super` + `Shift` + `Ctrl` + arrows | Send the window to the monitor in that direction |
+| `Super` + `Shift` + `Alt` + arrows | Send the whole **workspace** to the monitor in that direction |
+| `Super` + `-` / `Super` + `=` | Resize horizontally by 100 px (`Shift` for vertical) |
+| `Super` + `Alt` + `-` / `=` | …by 25 px, for fine work |
+| `Super` + `Ctrl` + `-` / `=` | …by 300 px, for big moves |
 
 ### 1.6 Workspaces
 
+Ten per monitor.
+
 | Combo | Action |
 |---|---|
-| `Super` + `1`…`9` | Switch to workspace N |
-| `Super` + `Shift` + `1`…`9` | Send active window to workspace N |
+| `Super` + `1`…`0` | The Nth workspace **of the screen you are looking at** |
+| `Super` + `Shift` + `1`…`0` | Send the window to that slot and follow it |
+| `Super` + `Shift` + `Alt` + `1`…`0` | Send it there silently, without following |
+| `Super` + `S` / `Super` + `Alt` + `S` | Toggle the scratchpad / park the window on it |
+| `Super` + `grave` / `Super` + `Shift` + `grave` | Toggle the Quake console / move the window onto it |
 
-> Workspaces 1–3 live on the **desk primary (Xiaomi 27" 4K)** · 4–5 on **eDP-1 (laptop)** · 6–9 on the **portable QHD (right)**.
-> Workspace `1` (Xiaomi) is the default for new windows.
+> Each panel owns a static block of ten ids anchored by EDID: **eDP-1 `1-10`**, **Xiaomi
+> `11-20`**, **portable QHD `21-30`**, anything unknown `91-100`. So `Super`+`4` is your
+> fourth workspace on whichever screen you are on, not "the laptop" as it used to be.
+> Mechanism, and why Omarchy's own implementation was not imported:
+> `runbooks/monitors.md` §21.
 
 ### 1.7 Screenshots
 
@@ -99,6 +144,7 @@ This is the day-to-day reference: the "memorize these first" cheatsheet up top, 
 |---|---|
 | `Print` | Region capture → opens **satty** for annotation → copies to clipboard |
 | `Shift` + `Print` | Full-screen capture → opens satty → copies to clipboard |
+| `Super` + `Print` | Colour picker (`hyprpicker -a`). ⚠ **Not installed yet** — waits for the next `paru -Syu` |
 
 ### 1.8 Audio / brightness (via SwayOSD popups)
 
@@ -109,11 +155,27 @@ This is the day-to-day reference: the "memorize these first" cheatsheet up top, 
 | `Fn` + Brightness Up/Down | Backlight (`nvidia_wmi_ec_backlight`) |
 | Media keys (Play/Next/Prev) | Control playerctl-aware apps (Spotify, browsers) |
 
+**Notifications (mako):**
+
+| Combo | Action |
+|---|---|
+| `Super` + `,` | Act on the last notification (`makoctl invoke`) |
+| `Super` + `Alt` + `,` | Dismiss the last one |
+| `Super` + `Shift` + `,` | Dismiss them all |
+| `Super` + `Shift` + `Alt` + `,` | Restore the last dismissed one |
+
 ### 1.9 Touchpad gesture
 
-| Gesture | Action |
+| Input | Action |
 |---|---|
 | 3-finger horizontal swipe | Switch workspace |
+| Closing the lid | Turns eDP-1 off **only if another screen is connected**; opening it puts the panel back and hands the refresh rate to `edp-rate.sh`. Suspend-on-lid stays with logind/hypridle |
+| `Super` + `C` / `V` / `X` / `A` | Universal copy / paste / cut / select-all — sends `Ctrl+…` to normal windows and `Ctrl+Shift+…` to terminals, decided by the `terminal` tag in `lua/windowrules.lua` |
+
+> The clipboard binds are the most fragile thing in this map: they inject synthetic key state,
+> split down/up by 50 ms to work around Hyprland leaving keys stuck. If they misbehave, delete
+> `lua/bindings-clipboard.lua` and its `require` — nothing else depends on it, and
+> `Super`+`V` simply goes quiet.
 
 ---
 
@@ -148,7 +210,7 @@ The compositor is **dwindle**: every new window splits the focused space in half
 1. **Focus the window** you want to move (`Super` + arrows or click).
 2. **`Super` + `Shift` + arrow** — slot it into a neighbor position.
 3. To change *how* the split happened (vertical ↔ horizontal): focus the window, `Super` + `J`.
-4. To break out of tiling for a single window: `Super` + `V` (toggle floating). Then drag with `Super` + left-mouse to move it freely, `Super` + right-mouse to resize.
+4. To break out of tiling for a single window: `Super` + `T` (toggle floating). Then drag with `Super` + left-mouse to move it freely, `Super` + right-mouse to resize.
 5. To send a window to another monitor's workspace: `Super` + `Shift` + (`1`/`2`/`3` for the Xiaomi desk primary, `4`/`5` for laptop, `6`–`9` for the portable QHD). Then follow with `Super` + N to jump to that workspace.
 
 ### E. "Quick screenshot for a bug report / Slack"
@@ -158,7 +220,7 @@ The compositor is **dwindle**: every new window splits the focused space in half
 
 ### F. "I'm done for the day"
 
-- `Super` + `L` → lock immediately. Hyprlock shows a blurred wallpaper + clock + password input.
+- `Super` + `Ctrl` + `L` → lock immediately. Hyprlock shows a blurred wallpaper + clock + password input.
 - Or just walk away — Hypridle handles it:
   - 5 min idle → lock screen
   - 10 min idle → monitors sleep (DPMS off)
@@ -177,6 +239,13 @@ The compositor is **dwindle**: every new window splits the focused space in half
 ---
 
 ## 3. Multi-monitor layout (current)
+
+> ⚠ **2026-11-03: the profile system described below is parked.** Hyprland 0.57.1 removed
+> `hyprctl keyword`, which is how `monitor-mode.sh` and the hotplug autoswitcher apply a
+> layout. Nothing auto-switches, no key opens the menu or Hyprmon, and the live geometry is
+> the static 3-across in `~/.config/hypr/lua/monitors.lua`. `Super`+`Ctrl`+`Delete` toggles
+> the laptop panel natively. The rest of this section is what the port has to restore —
+> `runbooks/monitors.md` §16.
 
 **Live right now** is the `read` profile (the desk auto-picks it): the **Xiaomi 27" 4K**
 landscape-left @ 3072×1728 (scale 1.25) · portable QHD rotated **portrait**-right (1280×2048
@@ -285,7 +354,7 @@ Walker (`Super` + `Space`) replaces rofi/wofi/krunner. Behaviors that are easy t
 - **Shift + Enter** activates AND keeps Walker open (launch multiple apps in a row)
 - **Escape** cancels
 - **Up / Down** or **Ctrl-K / Ctrl-J** navigate the list
-- **Type `Shortcuts`** (or `cheatsheet` / `hotkeys` / `keys`) → a **Shortcuts** app entry that opens this cheatsheet in a floating Kitty window. It's a normal `.desktop` app (`~/.local/share/applications/shortcuts.desktop`, mirrored in `configs/applications/`) backed by `~/.config/hypr/scripts/show-shortcuts.sh`; the same script is bound to `Super` + `/`. Keep the curated subset in that script in sync with §1 when bindings change.
+- **Type `Shortcuts`** (or `cheatsheet` / `hotkeys` / `keys`) → a **Shortcuts** app entry that opens this cheatsheet in a floating Kitty window. It's a normal `.desktop` app (`~/.local/share/applications/shortcuts.desktop`, mirrored in `configs/applications/`) backed by `~/.config/hypr/scripts/show-shortcuts.sh`; the same script is bound to `Super` + `K` (and `Super` + `/`). Since 2026-11-03 it is **generated** from `hyprctl binds -j`, so there is no curated subset left to keep in sync — give a bind a `description` in `configs/hypr/lua/` and it appears.
 
 ### 4.1 Architecture (matters when things break)
 
@@ -340,7 +409,7 @@ The terminal uses JetBrains Mono Nerd Font 12pt + Catppuccin Mocha theme + 95% b
 
 ## 7. Lock screen / idle
 
-- **Manual lock:** `Super` + `L`
+- **Manual lock:** `Super` + `Ctrl` + `L`
 - **Auto-lock:** 5 minutes of input idle
 - **Screen off:** 10 minutes
 - **Suspend:** 20 minutes, **battery only** (will require password to resume). On AC/USB-C power the machine stays awake — changed 2026-07-12 after a resume-from-suspend NVIDIA crash (see `ACTUAL-CONFIGURATION.md` §15, GSP row).
@@ -394,8 +463,8 @@ end
 
 | File | What it controls |
 |---|---|
-| `~/.config/hypr/keybindings.conf` | Add/remove keyboard shortcuts |
-| `~/.config/hypr/monitors.conf` | **Boot-default** layout and workspace-to-monitor bindings. The live layout comes from the profiles (§3); edit those in Hyprmon. ⚠ Saving this file auto-reloads Hyprland, which snaps the screens to this geometry until the next profile switch (`Super` + `M` twice) |
+| `~/.config/hypr/lua/bindings-*.lua` | Add/remove keyboard shortcuts (give each one a `description`) |
+| `~/.config/hypr/lua/monitors.lua` | The layout, full stop — the profile system is parked (§3). ⚠ Saving a `.lua` reloads **nothing**: run `hyprctl reload` yourself |
 | `~/.config/hypr/autostart.conf` | What launches when you log in |
 
 After any change: `hyprctl reload` (no logout needed). Tracked copies live in `configs/hypr/` in this repo.

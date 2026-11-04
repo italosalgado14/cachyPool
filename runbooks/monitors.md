@@ -49,7 +49,22 @@ To revert: restore the original `monitors.conf` (which had scale `1` everywhere)
 
 ---
 
-## 16. Visual monitor layouts: Hyprmon as editor, `monitor-mode.sh` as applier — ✅ APPLIED 2026-10-15, `hyprmon-bin` installed + verified 2026-10-16
+## 16. Visual monitor layouts: Hyprmon as editor, `monitor-mode.sh` as applier — ⚠ PARKED 2026-11-03 (was ✅ APPLIED 2026-10-15)
+
+> ⚠ **Everything in this section is parked, not broken and not deleted.** Hyprland 0.57.1
+> removed `hyprctl keyword`, which is how every piece of it drives the live layout:
+> `apply_<mode>`, `apply_from_profile`, `apply_monitor_tf()` in `monitor-mode.sh`, hyprmon's
+> own `A` and `S` keys, and therefore `monitor-menu.sh` and `hyprmon-edit.sh` too.
+> `monitor-autoswitch.sh` is **not started**, no key is bound to the menu or the editor, and
+> `configs/hypr/lua/monitors.lua` is now the only owner of geometry — a static 3-across
+> layout with no profile switching and no hotplug reconcile. The port is mechanical: all 12
+> call sites are `keyword monitor <spec>`, and `hyprctl eval 'hl.monitor({output=…, mode=…,
+> position=…, scale=…, disabled=…, transform=…})'` is verified to do the same job (the scale
+> change 1.6 → 1.25 on eDP-1 was measured through it). What must survive the port is the
+> disable → re-enable **cycle** for a transform and the fingerprint handshake that keeps the
+> autoswitcher from reverting a manual choice. The one piece that could not wait, the refresh
+> rate following the power source, was pulled out into `scripts/edp-rate.sh`
+> (`power-battery.md` §19). `updates.md` §4e.
 
 **Why:** the only way to rearrange screens was editing coordinate arithmetic in `monitor-mode.sh`, and there was no quick way into monitor settings. Omarchy's answer is *Setup > Monitors*, which opens its `monitors.lua` in an editor, plus a pointer to Hyprmon in its manual for drag-to-arrange. Adopting Hyprmon wholesale was rejected after reading hyprmon 0.0.17's source. `applyProfile` and the `S` key set transforms with a bare `hyprctl keyword monitor` (the 2026-08-04 stale-layout-box bug). They rewrite `monitor=` lines in `hyprland.conf`, where ours has none, so hyprmon would *append* port-bound lines after the `source` lines. They leave a never-pruned `.bak.<ts>`, write only the profile's monitors, and end with `hyprctl reload`. Hyprmon also has no hotplug auto-switching, and its profiles only know specific monitors. So it's a hybrid: Hyprmon edits, `monitor-mode.sh` applies.
 
@@ -143,6 +158,48 @@ rm ~/.local/share/applications/{hyprmon,monitors}.desktop
 
 ---
 
+
+---
+
+## 21. Per-monitor workspaces — ✅ APPLIED 2026-11-03
+
+**Why:** adopting Omarchy's keymap brought its workspace model with it. A global 1–9 split
+across three panels (1–3 Xiaomi, 4–5 eDP-1, 6–9 portable) means `Super+4` is "the laptop",
+not "my fourth workspace" — the number names a *screen*, so the hand has to know the layout
+before it can pick a workspace. Per-monitor blocks make `Super+1..0` mean *the Nth workspace
+of the screen I am looking at*, on every screen.
+
+**What it is:** `configs/hypr/lua/workspaces.lua`, ~115 lines including the comments. A block
+is a base id plus a match; the slot is added to the base:
+
+| Panel | Match | Block | Slots |
+|---|---|---|---|
+| Laptop | `name = "eDP-1"` | 0 | ids 1–10 |
+| Xiaomi 27" 4K | `desc = "Xiaomi Corporation Mi Monitor"` | 10 | ids 11–20 |
+| VCHANCE AQ16H | `desc = "Invalid Vendor Codename - RTK HDMI"` | 20 | ids 21–30 |
+| anything unknown | — | 90 | ids 91–100 |
+
+`hl.workspace_rule` pins all 30 ids to their panel and makes each block's first slot that
+panel's `default`. The four bind actions (`focus`, `move_window`, `move_to_monitor`,
+`move_window_to_monitor`) resolve the base from `hl.get_active_monitor()` at press time, so
+nothing is hardcoded per key.
+
+**Why not Omarchy's own `monitor-workspaces.lua`:** it is 713 lines with persistent state
+files in `$XDG_STATE_HOME`, dynamic block re-allocation and `reconcile`/`reclaim`/`adopt` on
+every hotplug — and when two panels share a description its tie-break is
+`left.name < right.name`, i.e. **ordering by connector name**, which is exactly what rotates
+between `DP-1` and `DP-2` on this machine (both externals are DP tunnels over one Thunderbolt
+connector). With three known panels a fixed block anchored to the EDID description is shorter,
+inspectable and cannot be reshuffled by plug order. The keyboard semantics are identical.
+
+**The cost:** a fourth panel lands in the 91–100 fallback and shares it with any other
+stranger. Add a row to `BLOCKS` when one becomes permanent.
+
+⚠ **Not verified with the externals connected.** The dock (Plugable TBT4-UD5) was
+`disconnected` throughout, so only the eDP-1 block (ids 1–10, `default` on 1) has been
+exercised live; the two `desc:` blocks are ported from the `workspace =` lines that were in
+`monitors.conf` and carry the same match strings. Check `hyprctl workspacerules` and
+`Super+1` on each screen at the next dock connect.
 
 ---
 
